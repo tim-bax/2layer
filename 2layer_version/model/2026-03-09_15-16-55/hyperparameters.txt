@@ -1,0 +1,9 @@
+
+HYPERPARAMETERS (two-layer)
+================================================================================
+Random seed: 12
+Architecture:
+  n_inputs: 700, n_extra: 42, n_hidden: 40, n_outputs: 20
+Training:
+  Epochs: 3, Batch size: 1
+================================================================================

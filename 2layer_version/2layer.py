@@ -415,22 +415,32 @@ class JAXEPropNetworkTwoLayer:
 
     def evaluate(self, test_data: List[Tuple]) -> Dict:
         correct = total = 0
+        test_losses = []
         confusion = np.zeros((self.n_outputs, self.n_outputs))
         for x_raw, target in test_data:
-            # Expect pre-built (T, n_inputs) from run script
             x = jnp.array(x_raw)
-            pred = self.predict(x)
+            *_, readout_o = self.forward(x)
+            readout_counts = jnp.sum(readout_o, axis=0)
+            scaled_counts = readout_counts / self.loss_temperature + self.loss_count_bias
+            exp_counts = jnp.exp(scaled_counts - jnp.max(scaled_counts))
+            probabilities = exp_counts / jnp.sum(exp_counts)
+            target_one_hot = jnp.zeros(self.n_outputs).at[target].set(1.0)
+            target_one_hot = target_one_hot * (1 - self.loss_label_smoothing) + self.loss_label_smoothing / self.n_outputs
+            loss = float(-jnp.sum(target_one_hot * jnp.log(probabilities + 1e-8)))
+            test_losses.append(loss)
+            pred = int(jnp.argmax(probabilities))
             if pred == target:
                 correct += 1
             total += 1
             confusion[target, pred] += 1
         acc = correct / total * 100 if total else 0.0
+        avg_loss = float(np.mean(test_losses)) if test_losses else 0.0
         per_class = {}
         for i in range(self.n_outputs):
             ct = np.sum(confusion[i, :])
             if ct > 0:
                 per_class[i] = confusion[i, i] / ct * 100
-        return {'accuracy': acc, 'correct': correct, 'total': total, 'confusion_matrix': confusion, 'per_class_accuracy': per_class}
+        return {'accuracy': acc, 'avg_loss': avg_loss, 'correct': correct, 'total': total, 'confusion_matrix': confusion, 'per_class_accuracy': per_class}
 
     def save(self, path: str):
         with open(path, 'wb') as f:
@@ -485,6 +495,9 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
         np.random.seed(random_seed + epoch)
         np.random.shuffle(train_data)
         epoch_start = time.time()
+        epoch_losses = []
+        epoch_correct = 0
+        epoch_total = 0
         n_batches = (n_train + batch_size - 1) // batch_size
         for batch_idx in range(n_batches):
             start_idx = batch_idx * batch_size
@@ -493,11 +506,23 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
             if batch_size == 1:
                 x_arr, target = batch_data[0]
                 x = jnp.asarray(x_arr)
-                network.train_step(x, target)
+                loss, hidden_o, readout_o, _ = network.train_step(x, target)
+                epoch_losses.append(loss)
+                pred = network.predict(x)
+                if pred == target:
+                    epoch_correct += 1
+                epoch_total += 1
             else:
                 batch_inputs = jnp.array([x for x, _ in batch_data])
                 batch_targets = jnp.array([t for _, t in batch_data], dtype=jnp.int32)
-                network.train_step_batch(batch_inputs, batch_targets)
+                avg_loss, hidden_os_list, readout_os_list = network.train_step_batch(batch_inputs, batch_targets)
+                for i in range(len(batch_data)):
+                    epoch_losses.append(avg_loss)
+                for i in range(batch_inputs.shape[0]):
+                    pred = network.predict(batch_inputs[i])
+                    if pred == batch_targets[i]:
+                        epoch_correct += 1
+                    epoch_total += 1
             idx = end_idx - 1
             if (idx + 1) % 5000 == 0 or idx == 0 or end_idx == n_train:
                 elapsed = time.time() - epoch_start
@@ -505,9 +530,25 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
                 eta = (n_train - idx - 1) / rate if rate > 0 else 0
                 print(f"  Epoch {epoch+1}: {idx+1}/{n_train} samples ({100*(idx+1)/n_train:.0f}%) | "
                       f"{rate:.1f} samples/s | ETA this epoch: {eta:.0f}s", flush=True)
+        epoch_avg_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
+        epoch_accuracy = epoch_correct / epoch_total * 100 if epoch_total else 0.0
         res = network.evaluate(test_data)
-        epoch_results.append({"epoch": epoch + 1, "test_accuracy": res["accuracy"], "correct": res["correct"], "total": res["total"]})
-        print(f"Epoch {epoch+1} test accuracy: {res['accuracy']:.2f}%")
+        epoch_results.append({
+            "epoch": epoch + 1,
+            "train_avg_loss": epoch_avg_loss,
+            "train_accuracy": epoch_accuracy,
+            "train_correct": epoch_correct,
+            "train_total": epoch_total,
+            "test_accuracy": res["accuracy"],
+            "test_avg_loss": res["avg_loss"],
+            "correct": res["correct"],
+            "total": res["total"],
+        })
+        print(f"\n{'='*80}", flush=True)
+        print(f"EPOCH {epoch+1}/{epochs} SUMMARY", flush=True)
+        print(f"{'='*80}", flush=True)
+        print(f"Train - Average Loss: {epoch_avg_loss:.4f}, Accuracy: {epoch_accuracy:.2f}% ({epoch_correct}/{epoch_total})", flush=True)
+        print(f"Test - Average Loss: {res['avg_loss']:.4f}, Accuracy: {res['accuracy']:.2f}% ({res['correct']}/{res['total']})", flush=True)
         if res["accuracy"] > best_accuracy:
             best_accuracy = res["accuracy"]
             acc_str = f"{int(best_accuracy * 100) // 100:02d}_{int(best_accuracy * 100) % 100:02d}"
@@ -521,6 +562,7 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
     with open(os.path.join(run_dir, "training_summary.json"), "w") as f:
         json.dump({
             "final_test_accuracy": final_res["accuracy"],
+            "final_test_loss": final_res["avg_loss"],
             "best_accuracy": best_accuracy,
             "best_model_path": best_model_path,
             "epoch_results": epoch_results,

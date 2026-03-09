@@ -4,6 +4,7 @@ Run 2-layer model on SHD. Loads SHD data, converts to (T, n_inputs), trains the 
 """
 import os
 import sys
+import importlib.util
 from datetime import datetime
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,11 +25,11 @@ _spec2.loader.exec_module(_net)
 JAXEPropNetworkTwoLayer = _net.JAXEPropNetworkTwoLayer
 train_network_two_layer = _net.train_network_two_layer
 
-T_SHD = int(os.getenv("T_MS", "1400"))
-N_EXTRA = int(os.getenv("N_EXTRA", "128"))
+T_SHD = int(os.getenv("T_MS", "700"))
+N_EXTRA = int(os.getenv("N_EXTRA", "42"))
 N_HIDDEN = int(os.getenv("N_HIDDEN", "40"))
 N_OUTPUTS = 20
-RANDOM_SEED = int(os.getenv("RANDOM_SEED", "42"))
+RANDOM_SEED = int(os.getenv("RANDOM_SEED", "12"))
 
 
 def main():
