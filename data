@@ -1,0 +1,7 @@
+<script>start("/Users/tbax/Documents/1:2layer/data/");</script>
+<script>onHasParentDirectory();</script>
+<script>addRow("__pycache__","__pycache__",1,128,"128 B",1773064593,"3/9/26, 2:56:33 PM");</script>
+<script>addRow("__init__.py","__init__.py",0,476,"476 B",1773064547,"3/9/26, 2:55:47 PM");</script>
+<script>addRow("nmnist.py","nmnist.py",0,5395,"5.3 kB",1773064533,"3/9/26, 2:55:33 PM");</script>
+<script>addRow("README.md","README.md",0,788,"788 B",1773064600,"3/9/26, 2:56:40 PM");</script>
+<script>addRow("shd.py","shd.py",0,8772,"8.6 kB",1773064516,"3/9/26, 2:55:16 PM");</script>
