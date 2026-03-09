@@ -1,5 +1,4 @@
 import time
-import sys
 from datetime import datetime
 import os
 
@@ -1132,7 +1131,7 @@ class JAXEPropNetwork:
             if idx % 1000 == 0 and idx > 0:
                 print(f"  Evaluation: {idx}/{len(test_data)} samples", flush=True)
             
-            x_network = _to_network_input(x_input, self.T, create_shd_input_jax)
+            x_network = create_shd_input_jax(x_input, self.T)
             x_network_jax = jnp.array(x_network)
             
             # Forward pass
@@ -1246,24 +1245,15 @@ def alpha_kernel_jax(t_vals: jnp.ndarray, tau: float) -> jnp.ndarray:
     k = (t_vals / tau) * jnp.exp(-t_vals / tau)
     return jnp.where(t_vals < 0, 0.0, k)
 
-def _to_network_input(x_input, T: int, create_fn) -> np.ndarray:
-    """If x_input is already (T, n_inputs) array, return it; else convert with create_fn(x_input, T)."""
-    if isinstance(x_input, np.ndarray) and x_input.ndim == 2:
-        return x_input
-    return create_fn(x_input, T)
-
-
 def create_shd_input_jax(shd_data: List[np.ndarray], T: int = 1400,
                            tau_alpha: float = 3.3, spike_amplitude: float = 5.0,
                            use_kernel: bool = True) -> np.ndarray:
-    """Create SHD input. NOTE: This uses a JAX kernel; results can differ slightly from
-    data.create_shd_input_jax (NumPy kernel) due to different exp/rounding. For identical
-    loss/trajectory to run_shd.py, use the data package and pre-convert (see __main__)."""
+    """Create SHD input optimized for JAX"""
     n_units = len(shd_data)
     x_input = np.zeros((T, n_units))
     
     if use_kernel:
-        # Pre-compute kernel (JAX path; data/shd.py uses NumPy → slightly different floats)
+        # Pre-compute kernel
         kernel_len = int(10 * tau_alpha)
         t_vals = np.arange(kernel_len)
         k = alpha_kernel_jax(jnp.array(t_vals), tau_alpha)
@@ -1517,7 +1507,7 @@ def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarra
             if batch_size == 1:
                 # Single sample mode (for compatibility/debugging)
                 x_input, target = batch_data[0]
-                x_network = _to_network_input(x_input, network.T, create_shd_input_jax)
+                x_network = create_shd_input_jax(x_input, network.T)
                 x_network_jax = jnp.array(x_network)
                 loss, hidden_o, readout_o = network.train_step(x_network_jax, target)
                 hidden_os = [hidden_o]
@@ -1530,7 +1520,7 @@ def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarra
                 batch_targets = []
                 
                 for x_input, target in batch_data:
-                    x_network = _to_network_input(x_input, network.T, create_shd_input_jax)
+                    x_network = create_shd_input_jax(x_input, network.T)
                     batch_inputs.append(x_network)
                     batch_targets.append(target)
                 
@@ -1766,17 +1756,6 @@ def print_summary_statistics(network: JAXEPropNetwork, epoch_results: List[Dict]
 ''' MAIN EXECUTION '''
 
 if __name__ == "__main__":
-    # Project root for shared data package (same conversion as run_shd.py for identical results)
-    _compare_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if _compare_root not in sys.path:
-        sys.path.insert(0, _compare_root)
-    try:
-        from data import create_shd_input_jax as data_create_shd_input_jax
-        _use_data_package = True
-    except ImportError:
-        data_create_shd_input_jax = None
-        _use_data_package = False
-
     # Configuration - auto-detect data path (HPC-aware)
     if "SHD_DATA_PATH" in os.environ:
         data_path = os.environ["SHD_DATA_PATH"]
@@ -1794,12 +1773,12 @@ if __name__ == "__main__":
     model_check_path = "shd_2comp_model_jax.pkl"
     
     # Print hyperparameters at the start (using actual values from classes)
-    # Training / sequence length (set T_SHD=700 to match run_shd.py; RANDOM_SEED=12 to match run_shd)
-    T_SHD = int(os.getenv("T_SHD", "1400"))
+    # Create temporary instances to get default values
+    temp_config = NeuronConfig()
+    temp_network = JAXEPropNetwork(random.PRNGKey(0), n_inputs=700, n_hidden=64, n_outputs=20, T=1400)
+    # Training parameters (read from environment or use defaults)
     epochs = int(os.getenv("EPOCHS", "30"))
     batch_size = int(os.getenv("BATCH_SIZE", "32"))
-    temp_config = NeuronConfig()
-    temp_network = JAXEPropNetwork(random.PRNGKey(0), n_inputs=700, n_hidden=64, n_outputs=20, T=T_SHD)
     hyperparams_lines = [
         "", "HYPERPARAMETERS", "=" * 80,
         f"Random seed: {RANDOM_SEED}",
@@ -1876,16 +1855,9 @@ if __name__ == "__main__":
         print(f"  Training: {len(train_data)} samples (all available)", flush=True)
         print(f"  Test: {len(test_data)} samples (all available)", flush=True)
         
-        # Use shared data package conversion so results match run_shd.py (same kernel/numerics)
-        if _use_data_package and data_create_shd_input_jax is not None:
-            print(f"Converting to (T={T_SHD}, n_inputs) format with shared data package (match run_shd)...", flush=True)
-            train_data = [(data_create_shd_input_jax(x, T=T_SHD), label) for x, label in train_data]
-            test_data = [(data_create_shd_input_jax(x, T=T_SHD), label) for x, label in test_data]
-            n_inputs = train_data[0][0].shape[1]
-        else:
-            n_inputs = len(train_data[0][0])  # raw: number of units (700 for SHD)
-        
-        print(f"\nCreating JAX network with {n_inputs} inputs, T={T_SHD}...", flush=True)
+        # Create network
+        n_inputs = len(train_data[0][0])  # Number of input units (should be 700 for SHD)
+        print(f"\nCreating JAX network with {n_inputs} inputs...", flush=True)
         
         # Initialize weights using NumPy's exact initialization logic
         # IMPORTANT: Set seed ONCE here (using configurable seed)
@@ -1908,7 +1880,7 @@ if __name__ == "__main__":
         print(f"  Creating JAX network with seed {RANDOM_SEED}...", flush=True)
         network_key = random.PRNGKey(RANDOM_SEED)
         network = JAXEPropNetwork(network_key, n_inputs=n_inputs, n_hidden=64, 
-                                n_outputs=20, T=T_SHD)
+                                n_outputs=20, T=1400)
         
         # Sync weights from NumPy initialization to JAX network
         print("  Syncing NumPy-initialized weights to JAX network...", flush=True)
