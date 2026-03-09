@@ -93,7 +93,17 @@ class JAXEPropNetworkTwoLayer:
     """
 
     def __init__(self, key, n_inputs: int = 700, n_extra: int = 10, n_hidden: int = 64,
-                 n_outputs: int = 20, T: int = 1400):
+                 n_outputs: int = 20, T: int = 700,
+                 learning_rate_extra_dendritic: Optional[float] = None,
+                 learning_rate_extra_soma: Optional[float] = None,
+                 learning_rate_hidden_dendritic: Optional[float] = None,
+                 learning_rate_hidden_somatic: Optional[float] = None,
+                 learning_rate_readout: Optional[float] = None,
+                 weight_decay: Optional[float] = None,
+                 gradient_clip: Optional[float] = None,
+                 loss_temperature: Optional[float] = None,
+                 loss_count_bias: Optional[float] = None,
+                 loss_label_smoothing: Optional[float] = None):
         self.n_inputs = n_inputs
         self.n_extra = n_extra
         self.n_hidden = n_hidden
@@ -107,7 +117,7 @@ class JAXEPropNetworkTwoLayer:
         self.hidden_layer = JAXTwoCompartmentalLayer(key_hidden, n_hidden, n_extra, self.config)
         self.readout_layer = JAXLIFLayer(key_readout, n_outputs, n_hidden, self.config)
 
-        # Match NumPy two_layer_numpy.py defaults (NMNIST / run_2layer.py)
+        # Match NumPy two_layer_numpy.py defaults (NMNIST / run_2layer.py); overridable by caller
         self.learning_rate_extra_dendritic = 0.05
         self.learning_rate_extra_soma = 0.0025
         self.learning_rate_hidden_dendritic = 0.05
@@ -115,10 +125,29 @@ class JAXEPropNetworkTwoLayer:
         self.learning_rate_readout = 0.025
         self.weight_decay = 0.00001
         self.gradient_clip = 5.0
-
         self.loss_temperature = 5.0
         self.loss_count_bias = 0.1
         self.loss_label_smoothing = 0.2
+        if learning_rate_extra_dendritic is not None:
+            self.learning_rate_extra_dendritic = learning_rate_extra_dendritic
+        if learning_rate_extra_soma is not None:
+            self.learning_rate_extra_soma = learning_rate_extra_soma
+        if learning_rate_hidden_dendritic is not None:
+            self.learning_rate_hidden_dendritic = learning_rate_hidden_dendritic
+        if learning_rate_hidden_somatic is not None:
+            self.learning_rate_hidden_somatic = learning_rate_hidden_somatic
+        if learning_rate_readout is not None:
+            self.learning_rate_readout = learning_rate_readout
+        if weight_decay is not None:
+            self.weight_decay = weight_decay
+        if gradient_clip is not None:
+            self.gradient_clip = gradient_clip
+        if loss_temperature is not None:
+            self.loss_temperature = loss_temperature
+        if loss_count_bias is not None:
+            self.loss_count_bias = loss_count_bias
+        if loss_label_smoothing is not None:
+            self.loss_label_smoothing = loss_label_smoothing
 
         self.activity_history: List = []
         self.debug_stats = {
@@ -482,6 +511,12 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
         f"  n_inputs: {network.n_inputs}, n_extra: {network.n_extra}, n_hidden: {network.n_hidden}, n_outputs: {network.n_outputs}",
         "Training:",
         f"  Epochs: {epochs}, Batch size: {batch_size}",
+        "Learning rates:",
+        f"  extra dend: {network.learning_rate_extra_dendritic}, extra soma: {network.learning_rate_extra_soma}",
+        f"  hidden dend: {network.learning_rate_hidden_dendritic}, hidden soma: {network.learning_rate_hidden_somatic}, readout: {network.learning_rate_readout}",
+        f"  weight_decay: {network.weight_decay}, gradient_clip: {network.gradient_clip}",
+        "Loss:",
+        f"  temperature: {network.loss_temperature}, count_bias: {network.loss_count_bias}, label_smoothing: {network.loss_label_smoothing}",
         "=" * 80, ""
     ]
     with open(os.path.join(run_dir, "hyperparameters.txt"), "w") as f:

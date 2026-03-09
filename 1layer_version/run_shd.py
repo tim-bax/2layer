@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Run 1-layer 2comp model on SHD. Loads SHD data, converts to (T, n_inputs), trains the standalone model.
-Use the same model for SHD and NMNIST; only data loading is dataset-specific.
+Edit the HYPERPARAMETERS block below or pass CLI args to change settings.
 """
+import argparse
 import os
 import sys
 from datetime import datetime
@@ -21,21 +22,80 @@ from model import (
     train_network_jax,
     print_summary_statistics,
     initialize_numpy_weights,
-    RANDOM_SEED,
     NeuronConfig,
 )
 import jax
 from jax import random
 import numpy as np
 
-T_SHD = 1400
+# -----------------------------------------------------------------------------
+# HYPERPARAMETERS — edit these or override via command line
+# -----------------------------------------------------------------------------
+# Architecture & data
+T_SHD = 700
 N_HIDDEN = 64
 N_OUTPUTS = 20
+RANDOM_SEED = 12
+EPOCHS = 30
+BATCH_SIZE = 32
+# Learning rates (hidden dendritic, hidden somatic, readout)
+LR_HIDDEN_DEND = 0.045
+LR_HIDDEN_SOMA = 0.00015
+LR_READOUT = 0.035
+# Regularization & training
+WEIGHT_DECAY = 0.00001
+GRADIENT_CLIP = 5.0
+# Loss (softmax temperature, count bias, label smoothing)
+LOSS_TEMPERATURE = 2.7
+LOSS_COUNT_BIAS = 0.18
+LOSS_LABEL_SMOOTHING = 0.13
+# -----------------------------------------------------------------------------
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Run 1-layer 2comp model on SHD")
+    p.add_argument("--T", type=int, default=None, help=f"Time steps (default: {T_SHD})")
+    p.add_argument("--n_hidden", type=int, default=None, help=f"Hidden units (default: {N_HIDDEN})")
+    p.add_argument("--n_outputs", type=int, default=None, help=f"Output classes (default: {N_OUTPUTS})")
+    p.add_argument("--seed", type=int, default=None, help=f"Random seed (default: {RANDOM_SEED})")
+    p.add_argument("--epochs", type=int, default=None, help=f"Epochs (default: {EPOCHS})")
+    p.add_argument("--batch_size", type=int, default=None, help=f"Batch size (default: {BATCH_SIZE})")
+    p.add_argument("--lr_hidden_dend", type=float, default=None)
+    p.add_argument("--lr_hidden_soma", type=float, default=None)
+    p.add_argument("--lr_readout", type=float, default=None)
+    p.add_argument("--weight_decay", type=float, default=None)
+    p.add_argument("--gradient_clip", type=float, default=None)
+    p.add_argument("--loss_temperature", type=float, default=None)
+    p.add_argument("--loss_count_bias", type=float, default=None)
+    p.add_argument("--loss_label_smoothing", type=float, default=None)
+    args = p.parse_args()
+    def _int(name, default): v = getattr(args, name); return v if v is not None else default
+    def _float(name, default): v = getattr(args, name); return v if v is not None else default
+    return {
+        "T_SHD": _int("T", T_SHD),
+        "N_HIDDEN": _int("n_hidden", N_HIDDEN),
+        "N_OUTPUTS": _int("n_outputs", N_OUTPUTS),
+        "RANDOM_SEED": _int("seed", RANDOM_SEED),
+        "EPOCHS": _int("epochs", EPOCHS),
+        "BATCH_SIZE": _int("batch_size", BATCH_SIZE),
+        "LR_HIDDEN_DEND": _float("lr_hidden_dend", LR_HIDDEN_DEND),
+        "LR_HIDDEN_SOMA": _float("lr_hidden_soma", LR_HIDDEN_SOMA),
+        "LR_READOUT": _float("lr_readout", LR_READOUT),
+        "WEIGHT_DECAY": _float("weight_decay", WEIGHT_DECAY),
+        "GRADIENT_CLIP": _float("gradient_clip", GRADIENT_CLIP),
+        "LOSS_TEMPERATURE": _float("loss_temperature", LOSS_TEMPERATURE),
+        "LOSS_COUNT_BIAS": _float("loss_count_bias", LOSS_COUNT_BIAS),
+        "LOSS_LABEL_SMOOTHING": _float("loss_label_smoothing", LOSS_LABEL_SMOOTHING),
+    }
 
 
 def main():
-    key = random.PRNGKey(RANDOM_SEED)
-    np.random.seed(RANDOM_SEED)
+    cfg = parse_args()
+    T, n_hidden, n_outputs = cfg["T_SHD"], cfg["N_HIDDEN"], cfg["N_OUTPUTS"]
+    seed, epochs, batch_size = cfg["RANDOM_SEED"], cfg["EPOCHS"], cfg["BATCH_SIZE"]
+
+    key = random.PRNGKey(seed)
+    np.random.seed(seed)
 
     # Data path
     if "SHD_DATA_PATH" in os.environ:
@@ -51,32 +111,37 @@ def main():
     run_dir = os.path.join(model_dir, timestamp)
     os.makedirs(run_dir, exist_ok=True)
 
-    epochs = int(os.getenv("EPOCHS", "30"))
-    batch_size = int(os.getenv("BATCH_SIZE", "32"))
-
     print("Loading SHD data...", flush=True)
     train_raw, test_raw = load_shd_data(
         data_path,
         train_samples_per_class=None,
         test_samples_per_class=None,
     )
-    print(f"Converting to (T={T_SHD}, n_inputs) format...", flush=True)
+    print(f"Converting to (T={T}, n_inputs) format...", flush=True)
     train_data = [
-        (create_shd_input_jax(x, T=T_SHD), label) for x, label in train_raw
+        (create_shd_input_jax(x, T=T), label) for x, label in train_raw
     ]
     test_data = [
-        (create_shd_input_jax(x, T=T_SHD), label) for x, label in test_raw
+        (create_shd_input_jax(x, T=T), label) for x, label in test_raw
     ]
     n_inputs = train_data[0][0].shape[1]
 
     print(f"Train: {len(train_data)}, Test: {len(test_data)}, n_inputs: {n_inputs}", flush=True)
     print(f"Creating network and initializing weights...", flush=True)
-    np.random.seed(RANDOM_SEED)
+    np.random.seed(seed)
     w_dend_np, w_soma_np, w_readout_np = initialize_numpy_weights(
-        n_inputs=n_inputs, n_hidden=N_HIDDEN, n_outputs=N_OUTPUTS
+        n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs
     )
     network = JAXEPropNetwork(
-        key, n_inputs=n_inputs, n_hidden=N_HIDDEN, n_outputs=N_OUTPUTS, T=T_SHD
+        key, n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs, T=T,
+        learning_rate_hidden_dendritic=cfg["LR_HIDDEN_DEND"],
+        learning_rate_hidden_somatic=cfg["LR_HIDDEN_SOMA"],
+        learning_rate_readout=cfg["LR_READOUT"],
+        weight_decay=cfg["WEIGHT_DECAY"],
+        gradient_clip=cfg["GRADIENT_CLIP"],
+        loss_temperature=cfg["LOSS_TEMPERATURE"],
+        loss_count_bias=cfg["LOSS_COUNT_BIAS"],
+        loss_label_smoothing=cfg["LOSS_LABEL_SMOOTHING"],
     )
     network.hidden_layer.w_dend = jax.numpy.array(w_dend_np)
     network.hidden_layer.w_soma = jax.numpy.array(w_soma_np)
@@ -84,8 +149,10 @@ def main():
 
     hyperparams_lines = [
         "", "1-layer SHD run", "=" * 80,
-        f"Random seed: {RANDOM_SEED}",
+        f"Random seed: {seed}",
         f"Epochs: {epochs}, Batch size: {batch_size}",
+        f"LR hidden dend: {cfg['LR_HIDDEN_DEND']}, soma: {cfg['LR_HIDDEN_SOMA']}, readout: {cfg['LR_READOUT']}",
+        f"Loss: temp={cfg['LOSS_TEMPERATURE']}, bias={cfg['LOSS_COUNT_BIAS']}, smoothing={cfg['LOSS_LABEL_SMOOTHING']}",
         "=" * 80, "",
     ]
     with open(os.path.join(run_dir, "hyperparameters.txt"), "w") as f:

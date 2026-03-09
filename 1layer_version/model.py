@@ -91,7 +91,15 @@ class JAXEPropNetwork:
     """Complete JAX implementation of e-prop network"""
     
     def __init__(self, key, n_inputs: int = 700, n_hidden: int = 64, 
-                 n_outputs: int = 20, T: int = 1400):
+                 n_outputs: int = 20, T: int = 700,
+                 learning_rate_hidden_dendritic=None,
+                 learning_rate_hidden_somatic=None,
+                 learning_rate_readout=None,
+                 weight_decay=None,
+                 gradient_clip=None,
+                 loss_temperature=None,
+                 loss_count_bias=None,
+                 loss_label_smoothing=None):
         self.n_inputs = n_inputs
         self.n_hidden = n_hidden
         self.n_outputs = n_outputs
@@ -107,17 +115,31 @@ class JAXEPropNetwork:
         self.hidden_layer = JAXTwoCompartmentalLayer(key_hidden, n_hidden, n_inputs, self.config)
         self.readout_layer = JAXLIFLayer(key_readout, n_outputs, n_hidden, self.config)
         
-        # Learning parameters
+        # Learning parameters (overridable by caller)
         self.learning_rate_hidden_dendritic = 0.045
         self.learning_rate_hidden_somatic = 0.00015
         self.learning_rate_readout = 0.035
         self.weight_decay = 0.00001
         self.gradient_clip = 5.0
-        
-        # Loss function hyperparameters
-        self.loss_temperature = 2.7        # 1.7 Temperature for softmax (spike count to probability)
-        self.loss_count_bias = 0.18         # 0.18 Bias added to scaled counts
-        self.loss_label_smoothing = 0.13   # 0.23 Label smoothing coefficient
+        self.loss_temperature = 2.7
+        self.loss_count_bias = 0.18
+        self.loss_label_smoothing = 0.13
+        if learning_rate_hidden_dendritic is not None:
+            self.learning_rate_hidden_dendritic = learning_rate_hidden_dendritic
+        if learning_rate_hidden_somatic is not None:
+            self.learning_rate_hidden_somatic = learning_rate_hidden_somatic
+        if learning_rate_readout is not None:
+            self.learning_rate_readout = learning_rate_readout
+        if weight_decay is not None:
+            self.weight_decay = weight_decay
+        if gradient_clip is not None:
+            self.gradient_clip = gradient_clip
+        if loss_temperature is not None:
+            self.loss_temperature = loss_temperature
+        if loss_count_bias is not None:
+            self.loss_count_bias = loss_count_bias
+        if loss_label_smoothing is not None:
+            self.loss_label_smoothing = loss_label_smoothing
         
         # Activity history for adaptive learning rates
         self.activity_history = []
