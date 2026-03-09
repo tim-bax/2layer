@@ -45,6 +45,7 @@ import json
 from datetime import datetime
 import numpy as np
 import jax
+jax.config.update("jax_enable_x64", True)  # Consistent float64 across all scripts
 import jax.numpy as jnp
 from jax import random, jit, vmap, lax
 from typing import List, Tuple, Dict, Optional

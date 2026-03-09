@@ -4,16 +4,21 @@ Run 2-layer model on NMNIST. Loads NMNIST data, converts to (T, n_inputs), train
 """
 import os
 import sys
+import importlib.util
 from datetime import datetime
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_SCRIPT_DIR)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+
+# Enable float64 for consistent numerics across all scripts (optional: set JAX_ENABLE_X64=0 to disable)
+import jax
+jax.config.update("jax_enable_x64", True)
+
 from data import load_nmnist_data, create_nmnist_input_jax
 
 sys.path.insert(0, _SCRIPT_DIR)
-import jax
 from jax import random
 import numpy as np
 

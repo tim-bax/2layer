@@ -41,6 +41,7 @@ if current_tmpdir == "/tmp" or not os.path.exists(current_tmpdir):
         os.environ["TMPDIR"] = fallback_tmpdir
 
 import jax
+jax.config.update("jax_enable_x64", True)  # Consistent float64 across all scripts
 import jax.numpy as jnp
 import numpy as np
 from jax import random, jit, grad, vmap, lax
