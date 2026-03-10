@@ -1,0 +1,30 @@
+
+HYPERPARAMETERS
+================================================================================
+Random seed: 42
+Learning rates:
+  Hidden (dendritic): 0.045
+  Hidden (somatic): 0.00015
+  Readout: 0.035
+Neuron parameters:
+  tau_soma: 15.0
+  tau_dend: 15.0
+  tau_plat: uniform(100.0, 350.0) ms per neuron
+  tau_m: 20.0
+  v_th: 1.0
+  mu_th: 1.0
+  gamma: 0.5
+  beta_s: 0.36
+  beta_d: 0.75
+Loss parameters:
+  Temperature: 2.7
+  Count bias: 0.18
+  Label smoothing: 0.13
+Other:
+  Weight decay: 1e-05
+  Gradient clip: 5.0
+  Sequence length (T): 1400 ms
+Training parameters:
+  Epochs: 30
+  Batch size: 4
+================================================================================

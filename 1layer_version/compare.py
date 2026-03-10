@@ -326,7 +326,7 @@ class NeuronConfig:
     v_th: float = 1.0
     gamma: float = 0.5
     tau_soma: float = 15.0
-    tau_dend: float = 75.0
+    tau_dend: float = 15.0
     tau_plat_min: float = 100.0  # Minimum plateau duration (ms)
     tau_plat_max: float = 350.0  # Maximum plateau duration (ms)
     dt: float = 1.0
@@ -1778,7 +1778,7 @@ if __name__ == "__main__":
     temp_network = JAXEPropNetwork(random.PRNGKey(0), n_inputs=700, n_hidden=64, n_outputs=20, T=1400)
     # Training parameters (read from environment or use defaults)
     epochs = int(os.getenv("EPOCHS", "30"))
-    batch_size = int(os.getenv("BATCH_SIZE", "32"))
+    batch_size = int(os.getenv("BATCH_SIZE", "4"))
     hyperparams_lines = [
         "", "HYPERPARAMETERS", "=" * 80,
         f"Random seed: {RANDOM_SEED}",

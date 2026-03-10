@@ -56,10 +56,12 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Helper function to initialize weights exactly like NumPy network does
-def initialize_numpy_weights(n_inputs: int, n_hidden: int, n_outputs: int):
+def initialize_numpy_weights(n_inputs: int, n_hidden: int, n_outputs: int, weight_scale: float = 0.15):
     """
     Initialize weights using NumPy's exact initialization logic.
     This replicates the sequential np.random.normal() calls from self_2comp_efficient_debug.py
+
+    weight_scale: multiplier on xavier_std (default 0.15). Use e.g. 0.25 for more initial spikes.
     
     IMPORTANT: This function does NOT reset the seed. It uses the current random state.
     The seed should be set ONCE at module level (np.random.seed(42)) before calling this.
@@ -75,8 +77,8 @@ def initialize_numpy_weights(n_inputs: int, n_hidden: int, n_outputs: int):
         # Xavier initialization for each neuron (sequential calls)
         fan_in = n_inputs
         xavier_std = np.sqrt(2.0 / fan_in)
-        w_dend[i] = np.random.normal(0.0, xavier_std * 0.15, size=n_inputs)
-        w_soma[i] = np.random.normal(0.0, xavier_std * 0.15, size=n_inputs)
+        w_dend[i] = np.random.normal(0.0, xavier_std * weight_scale, size=n_inputs)
+        w_soma[i] = np.random.normal(0.0, xavier_std * weight_scale, size=n_inputs)
     
     # Initialize readout layer weights
     # Each readout neuron is initialized sequentially
@@ -85,7 +87,7 @@ def initialize_numpy_weights(n_inputs: int, n_hidden: int, n_outputs: int):
     for i in range(n_outputs):
         fan_in = n_hidden
         xavier_std = np.sqrt(2.0 / fan_in)
-        w_readout[i] = np.random.normal(0.0, xavier_std * 0.15, size=n_hidden)
+        w_readout[i] = np.random.normal(0.0, xavier_std * weight_scale, size=n_hidden)
     
     # Total: (2*n_hidden + n_outputs) calls to np.random.normal consumed
     # For n_hidden=64, n_outputs=20: 2*64 + 20 = 148 calls
@@ -132,9 +134,10 @@ class NeuronConfig:
     dt: float = 1.0
     tau_m: float = 20.0
     v_reset: float = 0.0
-    beta_s: float = 0.36
+    beta_s: float = 0.36   # Larger = surrogate gradient more concentrated near spike threshold
     beta_d: float = 0.75
     beta: float = 0.36
+    weight_scale: float = 0.15  # Xavier scale factor; increase (e.g. 0.25) for more initial activity
 
 class JAXTwoCompartmentalLayer:
     """JAX implementation of two-compartmental neurons"""
@@ -162,7 +165,7 @@ class JAXTwoCompartmentalLayer:
         
         # Initialize weights
         xavier_std = jnp.sqrt(2.0 / n_inputs)
-        scale = xavier_std * 0.15
+        scale = xavier_std * config.weight_scale
         
         self.w_dend = random.normal(key1, (n_neurons, n_inputs)) * scale
         self.w_soma = random.normal(key2, (n_neurons, n_inputs)) * scale
@@ -414,7 +417,7 @@ class JAXLIFLayer:
         
         # Initialize weights
         xavier_std = jnp.sqrt(2.0 / n_inputs)
-        scale = xavier_std * 0.15
+        scale = xavier_std * config.weight_scale
         self.w = random.normal(key, (n_neurons, n_inputs)) * scale
     
     @staticmethod

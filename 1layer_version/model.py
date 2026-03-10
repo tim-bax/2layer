@@ -100,7 +100,11 @@ class JAXEPropNetwork:
                  gradient_clip=None,
                  loss_temperature=None,
                  loss_count_bias=None,
-                 loss_label_smoothing=None):
+                 loss_label_smoothing=None,
+                 neuron_config=None,
+                 beta_s=None,
+                 beta_d=None,
+                 weight_scale=None):
         self.n_inputs = n_inputs
         self.n_hidden = n_hidden
         self.n_outputs = n_outputs
@@ -109,8 +113,17 @@ class JAXEPropNetwork:
         # Split keys for different components
         key_hidden, key_readout = random.split(key)
         
-        # Configuration
-        self.config = NeuronConfig()
+        # Configuration: use provided config or build from defaults and overrides
+        if neuron_config is not None:
+            self.config = neuron_config
+        else:
+            self.config = NeuronConfig()
+            if beta_s is not None:
+                self.config = self.config.replace(beta_s=beta_s)
+            if beta_d is not None:
+                self.config = self.config.replace(beta_d=beta_d)
+            if weight_scale is not None:
+                self.config = self.config.replace(weight_scale=weight_scale)
         
         # Initialize layers
         self.hidden_layer = JAXTwoCompartmentalLayer(key_hidden, n_hidden, n_inputs, self.config)

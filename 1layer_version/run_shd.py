@@ -29,37 +29,8 @@ from model import (
     initialize_numpy_weights,
     NeuronConfig,
 )
-from jax import random, jit
-import jax.numpy as jnp
+from jax import random
 import numpy as np
-from typing import List
-
-# JAX-kernel conversion (same as compare.py) for --compare_style to replicate compare's result
-@jit
-def _alpha_kernel_jax(t_vals, tau):
-    k = (t_vals / tau) * jnp.exp(-t_vals / tau)
-    return jnp.where(t_vals < 0, 0.0, k)
-
-
-def _create_shd_input_compare_style(shd_data: List[np.ndarray], T: int, tau_alpha: float = 3.3, spike_amplitude: float = 5.0) -> np.ndarray:
-    """Same conversion as compare.py (JAX kernel) so run_shd can replicate compare's loss/trajectory."""
-    n_units = len(shd_data)
-    x_input = np.zeros((T, n_units))
-    kernel_len = int(10 * tau_alpha)
-    t_vals = np.arange(kernel_len)
-    k = _alpha_kernel_jax(jnp.array(t_vals), tau_alpha)
-    peak_value = np.exp(-1)
-    k_normalized = np.array(k) * (spike_amplitude / peak_value)
-    for unit_idx, spike_times in enumerate(shd_data):
-        for spike_time in spike_times:
-            spike_time_int = int(spike_time)
-            if 0 <= spike_time_int < T:
-                kernel_start = spike_time_int
-                kernel_end = min(kernel_start + kernel_len, T)
-                kernel_length_used = kernel_end - kernel_start
-                if kernel_length_used > 0:
-                    x_input[kernel_start:kernel_end, unit_idx] += k_normalized[:kernel_length_used]
-    return x_input
 
 # -----------------------------------------------------------------------------
 # HYPERPARAMETERS — edit these or override via command line
@@ -82,6 +53,11 @@ GRADIENT_CLIP = 5.0
 LOSS_TEMPERATURE = 2.7
 LOSS_COUNT_BIAS = 0.18
 LOSS_LABEL_SMOOTHING = 0.13
+# Surrogate gradient: larger beta = gradient more concentrated near spike (defaults 0.36 somatic, 0.75 dend)
+BETA_S = 1.0
+BETA_D = 1.5
+# Weight init scale (Xavier * scale); default 0.15; use ~0.25 to reduce all-zero readout at start
+WEIGHT_SCALE = 0.25
 # -----------------------------------------------------------------------------
 
 
@@ -101,7 +77,9 @@ def parse_args():
     p.add_argument("--loss_temperature", type=float, default=None)
     p.add_argument("--loss_count_bias", type=float, default=None)
     p.add_argument("--loss_label_smoothing", type=float, default=None)
-    p.add_argument("--compare_style", action="store_true", help="Use same JAX-kernel conversion as compare.py (replicate compare's result)")
+    p.add_argument("--beta_s", type=float, default=None, help="Somatic surrogate beta (larger = more spike-near)")
+    p.add_argument("--beta_d", type=float, default=None, help="Dendritic surrogate beta")
+    p.add_argument("--weight_scale", type=float, default=None, help="Weight init scale (e.g. 0.25 for more initial activity)")
     args = p.parse_args()
     def _int(name, default): v = getattr(args, name); return v if v is not None else default
     def _float(name, default): v = getattr(args, name); return v if v is not None else default
@@ -120,7 +98,9 @@ def parse_args():
         "LOSS_TEMPERATURE": _float("loss_temperature", LOSS_TEMPERATURE),
         "LOSS_COUNT_BIAS": _float("loss_count_bias", LOSS_COUNT_BIAS),
         "LOSS_LABEL_SMOOTHING": _float("loss_label_smoothing", LOSS_LABEL_SMOOTHING),
-        "COMPARE_STYLE": getattr(args, "compare_style", False),
+        "BETA_S": _float("beta_s", BETA_S),
+        "BETA_D": _float("beta_d", BETA_D),
+        "WEIGHT_SCALE": _float("weight_scale", WEIGHT_SCALE),
     }
 
 
@@ -152,22 +132,22 @@ def main():
         train_samples_per_class=None,
         test_samples_per_class=None,
     )
-    compare_style = cfg.get("COMPARE_STYLE", False)
-    if compare_style:
-        print(f"Converting to (T={T}, n_inputs) format (compare-style JAX kernel)...", flush=True)
-        create_fn = lambda x, T=T: _create_shd_input_compare_style(x, T)
-    else:
-        print(f"Converting to (T={T}, n_inputs) format (data package NumPy kernel)...", flush=True)
-        create_fn = lambda x, T=T: create_shd_input_jax(x, T=T)
-    train_data = [(create_fn(x), label) for x, label in train_raw]
-    test_data = [(create_fn(x), label) for x, label in test_raw]
+    print(f"Converting to (T={T}, n_inputs) format...", flush=True)
+    train_data = [
+        (create_shd_input_jax(x, T=T), label) for x, label in train_raw
+    ]
+    test_data = [
+        (create_shd_input_jax(x, T=T), label) for x, label in test_raw
+    ]
     n_inputs = train_data[0][0].shape[1]
 
     print(f"Train: {len(train_data)}, Test: {len(test_data)}, n_inputs: {n_inputs}", flush=True)
     print(f"Creating network and initializing weights...", flush=True)
     np.random.seed(seed)
+    weight_scale = cfg["WEIGHT_SCALE"]
     w_dend_np, w_soma_np, w_readout_np = initialize_numpy_weights(
-        n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs
+        n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs,
+        weight_scale=weight_scale,
     )
     network = JAXEPropNetwork(
         key, n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs, T=T,
@@ -179,6 +159,9 @@ def main():
         loss_temperature=cfg["LOSS_TEMPERATURE"],
         loss_count_bias=cfg["LOSS_COUNT_BIAS"],
         loss_label_smoothing=cfg["LOSS_LABEL_SMOOTHING"],
+        beta_s=cfg["BETA_S"],
+        beta_d=cfg["BETA_D"],
+        weight_scale=weight_scale,
     )
     network.hidden_layer.w_dend = jax.numpy.array(w_dend_np)
     network.hidden_layer.w_soma = jax.numpy.array(w_soma_np)
@@ -187,10 +170,10 @@ def main():
     hyperparams_lines = [
         "", "1-layer SHD run", "=" * 80,
         f"Random seed: {seed}",
-        f"Conversion: {'compare-style (JAX kernel)' if compare_style else 'data package (NumPy kernel)'}",
         f"Epochs: {epochs}, Batch size: {batch_size}",
         f"LR hidden dend: {cfg['LR_HIDDEN_DEND']}, soma: {cfg['LR_HIDDEN_SOMA']}, readout: {cfg['LR_READOUT']}",
         f"Loss: temp={cfg['LOSS_TEMPERATURE']}, bias={cfg['LOSS_COUNT_BIAS']}, smoothing={cfg['LOSS_LABEL_SMOOTHING']}",
+        f"beta_s: {cfg['BETA_S']}, beta_d: {cfg['BETA_D']}, weight_scale: {cfg['WEIGHT_SCALE']}",
         "=" * 80, "",
     ]
     with open(os.path.join(run_dir, "hyperparameters.txt"), "w") as f:
