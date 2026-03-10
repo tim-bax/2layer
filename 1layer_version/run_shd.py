@@ -20,15 +20,25 @@ jax.config.update("jax_enable_x64", True)
 
 from data import load_shd_data, create_shd_input_jax
 
-# Standalone model (no dataset code)
+# Standalone model: model.py (default) or model_lowmemory.py (--lowmemory)
 sys.path.insert(0, _SCRIPT_DIR)
-from model import (
-    JAXEPropNetwork,
-    train_network_jax,
-    print_summary_statistics,
-    initialize_numpy_weights,
-    NeuronConfig,
-)
+import importlib.util
+
+def _load_onelayer_module(lowmemory: bool):
+    """Load model.py or model_lowmemory.py; same API (JAXEPropNetwork, train_network_jax, etc.)."""
+    basename = "model_lowmemory.py" if lowmemory else "model.py"
+    path = os.path.join(_SCRIPT_DIR, basename)
+    spec = importlib.util.spec_from_file_location("onelayer_model", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return (
+        mod.JAXEPropNetwork,
+        mod.train_network_jax,
+        mod.print_summary_statistics,
+        mod.initialize_numpy_weights,
+        mod.NeuronConfig,
+    )
+
 from jax import random
 import numpy as np
 
@@ -80,10 +90,12 @@ def parse_args():
     p.add_argument("--beta_s", type=float, default=None, help="Somatic surrogate beta (larger = more spike-near)")
     p.add_argument("--beta_d", type=float, default=None, help="Dendritic surrogate beta")
     p.add_argument("--weight_scale", type=float, default=None, help="Weight init scale (e.g. 0.25 for more initial activity)")
+    p.add_argument("--lowmemory", action="store_true", help="Use model_lowmemory.py (lower memory, may be slower)")
     args = p.parse_args()
     def _int(name, default): v = getattr(args, name); return v if v is not None else default
     def _float(name, default): v = getattr(args, name); return v if v is not None else default
     return {
+        "LOWMEMORY": getattr(args, "lowmemory", False),
         "T_SHD": _int("T", T_SHD),
         "N_HIDDEN": _int("n_hidden", N_HIDDEN),
         "N_OUTPUTS": _int("n_outputs", N_OUTPUTS),
@@ -125,6 +137,10 @@ def main():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = os.path.join(model_dir, timestamp)
     os.makedirs(run_dir, exist_ok=True)
+
+    JAXEPropNetwork, train_network_jax, print_summary_statistics, initialize_numpy_weights, NeuronConfig = _load_onelayer_module(cfg["LOWMEMORY"])
+    if cfg["LOWMEMORY"]:
+        print("Using model_lowmemory.py", flush=True)
 
     print("Loading SHD data...", flush=True)
     train_raw, test_raw = load_shd_data(

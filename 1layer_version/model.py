@@ -438,7 +438,60 @@ class JAXEPropNetwork:
         loss = self._loss_impl(params, x_input, target)
         
         return new_params, loss, hidden_o, readout_o
-    
+
+    def get_single_sample_diagnostics(self, params: NetworkParams, x_input: jnp.ndarray, target: int) -> Dict:
+        """Compute target, prediction, and gradient-component norms for one sample (for first/last sample logging)."""
+        mu, v, h, hidden_o, readout_v, readout_o, mu_history, t_prime_history, v_history = self._forward_with_params(params, x_input)
+        prediction = int(jnp.argmax(jnp.sum(readout_o, axis=0)))
+        target_int = int(target) if hasattr(target, '__int__') else int(target)
+
+        global_errors = self.compute_global_errors(readout_o, target)
+        E_readout = JAXTwoCompartmentalLayer.compute_eligibility_traces(hidden_o, self.readout_layer.alpha)
+        v_input_vals = readout_v - self.config.v_th
+        sigma_prime_readout = JAXTwoCompartmentalLayer.surrogate_sigma(v_input_vals, self.config.beta_s)
+        grad_readout_raw = jnp.einsum('ti,tj,i->ij', sigma_prime_readout, E_readout, global_errors) / self.T
+
+        T = x_input.shape[0]
+        n_neurons = h.shape[1]
+        effective_error_time_series = jnp.einsum('tj,j,ji->ti', sigma_prime_readout, global_errors, params.w_readout)
+        soma_input_vals = v_history + self.config.gamma * h - self.config.v_th
+        sigma_prime_hidden = JAXTwoCompartmentalLayer.surrogate_sigma(soma_input_vals, self.config.beta_s)
+        t_prime_indices = t_prime_history.astype(jnp.int32)
+        neuron_indices = jnp.arange(n_neurons)[None, :]
+        mu_at_tprime = mu_history[t_prime_indices, neuron_indices]
+        dend_input_vals = mu_at_tprime - self.config.mu_th
+        h_prime = JAXTwoCompartmentalLayer.surrogate_sigma(dend_input_vals, self.config.beta_d)
+        E_soma = JAXTwoCompartmentalLayer.compute_eligibility_traces(x_input, self.hidden_layer.alpha_s)
+        dmu_tprime_dw = JAXTwoCompartmentalLayer.compute_dmu_tprime_dw(
+            x_input, h, t_prime_history, self.hidden_layer.alpha
+        )
+        grad_soma_raw = jnp.einsum('ti,tj,ti->ij', sigma_prime_hidden, E_soma, effective_error_time_series) / self.T
+        grad_dend_raw = jnp.einsum('ti,ti,tij,ti->ij',
+                                  sigma_prime_hidden, h_prime, dmu_tprime_dw,
+                                  effective_error_time_series * self.config.gamma) / self.T
+
+        loss = float(self._loss_impl(params, x_input, target))
+
+        def n(x):
+            return float(jnp.linalg.norm(x))
+
+        return {
+            "target": target_int,
+            "prediction": prediction,
+            "loss": loss,
+            "global_errors": n(global_errors),
+            "effective_error_time_series": n(effective_error_time_series),
+            "sigma_prime_readout": n(sigma_prime_readout),
+            "sigma_prime_hidden": n(sigma_prime_hidden),
+            "h_prime": n(h_prime),
+            "E_readout": n(E_readout),
+            "E_soma": n(E_soma),
+            "dmu_tprime_dw": n(dmu_tprime_dw),
+            "grad_dend": n(grad_dend_raw),
+            "grad_soma": n(grad_soma_raw),
+            "grad_readout": n(grad_readout_raw),
+        }
+
     def train_step(self, x_input: jnp.ndarray, target: int) -> Tuple[float, jnp.ndarray, jnp.ndarray]:
         """Perform one training step and update network"""
         params = self.get_params()
@@ -788,6 +841,16 @@ def print_training_diagnostics_jax(network: JAXEPropNetwork, sample_idx: int, re
     
     print(f"  {'-'*80}", flush=True)
 
+def _print_epoch_sample_diagnostics_1layer(d: Dict, label: str):
+    """Print first/last sample diagnostics for 1-layer (target, prediction, gradient norms)."""
+    print(f"  --- {label} ---", flush=True)
+    print(f"    target: {d['target']}  prediction: {d['prediction']}  loss: {d['loss']:.6f}", flush=True)
+    print(f"    Error:        global_errors: {d['global_errors']:.6f}  effective_error_time_series: {d['effective_error_time_series']:.6f}", flush=True)
+    print(f"    Surrogate:    sigma_prime_readout: {d['sigma_prime_readout']:.6f}  sigma_prime_hidden: {d['sigma_prime_hidden']:.6f}  h_prime: {d['h_prime']:.6f}", flush=True)
+    print(f"    Eligibility:  E_readout: {d['E_readout']:.6f}  E_soma: {d['E_soma']:.6f}  dmu_tprime_dw: {d['dmu_tprime_dw']:.6f}", flush=True)
+    print(f"    Grad norms:   grad_dend: {d['grad_dend']:.6f}  grad_soma: {d['grad_soma']:.6f}  grad_readout: {d['grad_readout']:.6f}", flush=True)
+
+
 def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarray, int]],
                      test_data: List[Tuple[np.ndarray, int]], epochs: int = 10, batch_size: int = 32,
                      run_dir: str = "model"):
@@ -863,8 +926,16 @@ def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarra
         shuffled_train_data = train_data.copy()
         np.random.shuffle(shuffled_train_data)
         
-        # Optional: Verify shuffle order matches (for debugging)
-        # Note: This requires running NumPy model first to get reference order
+        # First and last sample of epoch (shuffled order): print target, prediction, gradient-component norms
+        params = network.get_params()
+        x_first, target_first = shuffled_train_data[0]
+        x_last, target_last = shuffled_train_data[-1]
+        d_first = network.get_single_sample_diagnostics(params, jnp.array(np.asarray(x_first)), target_first)
+        d_last = network.get_single_sample_diagnostics(params, jnp.array(np.asarray(x_last)), target_last)
+        print(f"  Epoch {epoch+1} - First sample (shuffled):", flush=True)
+        _print_epoch_sample_diagnostics_1layer(d_first, "First sample")
+        print(f"  Epoch {epoch+1} - Last sample (shuffled):", flush=True)
+        _print_epoch_sample_diagnostics_1layer(d_last, "Last sample")
         
         epoch_losses = []
         epoch_correct = 0
