@@ -1,0 +1,11 @@
+
+1-layer SHD run
+================================================================================
+Random seed: 12
+Epochs: 30, Batch size: 32
+Warmup readout epochs: 1
+grad_dend_scale: 1.0, spike_dropout: 0.1
+LR hidden dend: 0.045, soma: 0.00015, readout: 0.035
+Loss: temp=2.7, bias=0.18, smoothing=0.13
+beta_s: 1.0, beta_d: 1.5, weight_scale: 0.25, readout_weight_scale: None
+================================================================================

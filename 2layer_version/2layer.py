@@ -581,22 +581,6 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
     with open(os.path.join(run_dir, "hyperparameters.txt"), "w") as f:
         f.write("\n".join(hyperparams_lines))
 
-    # INITIAL EVALUATION (before training)
-    print(f"\n{'='*80}", flush=True)
-    print("INITIAL EVALUATION (BEFORE TRAINING)", flush=True)
-    print(f"{'='*80}", flush=True)
-    initial_res = network.evaluate(test_data)
-    print(f"INITIAL TEST - Loss: {initial_res['avg_loss']:.4f}, Accuracy: {initial_res['accuracy']:.2f}% ({initial_res['correct']}/{initial_res['total']})", flush=True)
-    readout_counts_list = []
-    for x_raw, _ in test_data:
-        x_jax = jnp.array(x_raw)
-        *_, readout_o = network.forward(x_jax)
-        readout_counts_list.append(np.array(jnp.sum(readout_o, axis=0)))
-    readout_counts_arr = np.array(readout_counts_list)
-    ro_mean_per_neuron = np.mean(readout_counts_arr, axis=0)
-    print(f"Average readout firing rate (spikes/neuron/sample): mean = {ro_mean_per_neuron.mean():.2f}  (per neuron: min = {ro_mean_per_neuron.min():.2f}, max = {ro_mean_per_neuron.max():.2f})", flush=True)
-    print(f"{'='*80}\n", flush=True)
-
     best_accuracy = -1.0
     best_model_path = None
     epoch_results = []
