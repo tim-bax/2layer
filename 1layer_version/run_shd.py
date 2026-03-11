@@ -176,11 +176,24 @@ def main():
     print(f"Creating network and initializing weights...", flush=True)
     np.random.seed(seed)
     weight_scale = cfg["WEIGHT_SCALE"]
-    w_dend_np, w_soma_np, w_readout_np = initialize_numpy_weights(
-        n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs,
-        weight_scale=weight_scale,
-        readout_weight_scale=cfg["READOUT_WEIGHT_SCALE"],
-    )
+    readout_scale = cfg["READOUT_WEIGHT_SCALE"]
+    try:
+        w_dend_np, w_soma_np, w_readout_np = initialize_numpy_weights(
+            n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs,
+            weight_scale=weight_scale,
+            readout_weight_scale=readout_scale,
+        )
+    except TypeError as e:
+        if "readout_weight_scale" in str(e) or "unexpected keyword" in str(e).lower():
+            # Older layer module (e.g. 2comp_uniform before optional readout scale was added)
+            w_dend_np, w_soma_np, w_readout_np = initialize_numpy_weights(
+                n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs,
+                weight_scale=weight_scale,
+            )
+            if readout_scale is not None:
+                print("Note: readout_weight_scale ignored (layer module does not support it).", flush=True)
+        else:
+            raise
     network = JAXEPropNetwork(
         key, n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs, T=T,
         learning_rate_hidden_dendritic=cfg["LR_HIDDEN_DEND"],
