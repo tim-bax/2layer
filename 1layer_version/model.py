@@ -959,7 +959,15 @@ def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarra
         warmup_readout_epochs: If > 0, only update readout for the first this many epochs (hidden frozen).
         spike_dropout_prob: Train-time spike dropout rate (0 = off); fraction of non-zero input bins zeroed.
     """
-    from data import apply_spike_dropout
+    def apply_spike_dropout(x: np.ndarray, p_drop: float) -> np.ndarray:
+        """Zero out a fraction of non-zero input bins (train-time spike dropout)."""
+        if p_drop <= 0:
+            return x.copy()
+        out = np.asarray(x, dtype=np.float64).copy()
+        nonzero = out != 0
+        drop = np.random.random(out.shape) < p_drop
+        out[nonzero & drop] = 0
+        return out
     print(f"Training JAX network with {len(train_data)} training samples...", flush=True)
     print(f"Test set: {len(test_data)} samples (evaluated after each epoch)", flush=True)
     print(f"Network architecture: {network.n_inputs} inputs → {network.n_hidden} hidden → {network.n_outputs} outputs", flush=True)
