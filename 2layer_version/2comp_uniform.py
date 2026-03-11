@@ -56,17 +56,21 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Helper function to initialize weights exactly like NumPy network does
-def initialize_numpy_weights(n_inputs: int, n_hidden: int, n_outputs: int, weight_scale: float = 0.15):
+def initialize_numpy_weights(n_inputs: int, n_hidden: int, n_outputs: int, weight_scale: float = 0.15, readout_weight_scale: float = None):
     """
     Initialize weights using NumPy's exact initialization logic.
     This replicates the sequential np.random.normal() calls from self_2comp_efficient_debug.py
 
-    weight_scale: multiplier on xavier_std (default 0.15). Use e.g. 0.25 for more initial spikes.
+    weight_scale: multiplier on xavier_std for hidden layer (default 0.15). Use e.g. 0.25--0.4 for more initial activity.
+    readout_weight_scale: if set, use this for readout only (else use weight_scale). Larger readout init (e.g. 0.4--0.5)
+        gives non-zero, varied readout from the start so effective_error is non-tiny early in training.
     
     IMPORTANT: This function does NOT reset the seed. It uses the current random state.
     The seed should be set ONCE at module level (np.random.seed(42)) before calling this.
     This ensures the random state matches NumPy's sequence exactly.
     """
+    if readout_weight_scale is None:
+        readout_weight_scale = weight_scale
     # Initialize hidden layer weights (dendritic and somatic)
     # Each neuron is initialized sequentially, matching NumPy behavior
     # NumPy creates: n_hidden neurons × 2 weight arrays = 2*n_hidden calls to np.random.normal
@@ -80,14 +84,14 @@ def initialize_numpy_weights(n_inputs: int, n_hidden: int, n_outputs: int, weigh
         w_dend[i] = np.random.normal(0.0, xavier_std * weight_scale, size=n_inputs)
         w_soma[i] = np.random.normal(0.0, xavier_std * weight_scale, size=n_inputs)
     
-    # Initialize readout layer weights
+    # Initialize readout layer weights (optionally larger scale for non-zero initial readout output)
     # Each readout neuron is initialized sequentially
     # NumPy creates: n_outputs readout neurons × 1 weight array = n_outputs calls to np.random.normal
     w_readout = np.zeros((n_outputs, n_hidden))
     for i in range(n_outputs):
         fan_in = n_hidden
         xavier_std = np.sqrt(2.0 / fan_in)
-        w_readout[i] = np.random.normal(0.0, xavier_std * weight_scale, size=n_hidden)
+        w_readout[i] = np.random.normal(0.0, xavier_std * readout_weight_scale, size=n_hidden)
     
     # Total: (2*n_hidden + n_outputs) calls to np.random.normal consumed
     # For n_hidden=64, n_outputs=20: 2*64 + 20 = 148 calls

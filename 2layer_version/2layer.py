@@ -332,14 +332,47 @@ class JAXEPropNetworkTwoLayer:
         grad_extra_dend = jnp.clip(grad_extra_dend, -clip_value, clip_value)
 
         loss = self._loss_impl(params, x_input, target)
+        prediction = int(jnp.argmax(jnp.sum(readout_o, axis=0)))
+        target_int = int(target) if hasattr(target, '__int__') else int(target)
+
+        def _n(x):
+            return float(jnp.linalg.norm(x))
+
+        diagnostics = {
+            "target": target_int,
+            "prediction": prediction,
+            "loss": float(loss),
+            "global_errors": _n(global_errors),
+            "effective_error_hidden": _n(effective_error_hidden),
+            "sigma_prime_readout": _n(sigma_prime_readout),
+            "sigma_prime_hidden": _n(sigma_prime_hidden),
+            "sigma_prime_extra": _n(sigma_prime_extra),
+            "h_prime_hidden": _n(h_prime_hidden),
+            "h_prime_extra": _n(h_prime_extra),
+            "E_readout": _n(E_readout),
+            "E_soma_hidden": _n(E_soma_hidden),
+            "E_soma_extra": _n(E_soma_extra),
+            "dmu_dw_hidden": _n(dmu_dw_hidden),
+            "dmu_dw_extra": _n(dmu_dw_extra),
+            "grad_extra_dend": _n(grad_extra_dend),
+            "grad_extra_soma": _n(grad_extra_soma),
+            "grad_dend_hidden": _n(grad_dend_hidden),
+            "grad_soma_hidden": _n(grad_soma_hidden),
+            "grad_readout": _n(grad_readout),
+        }
         return (grad_extra_dend, grad_extra_soma, grad_dend_hidden, grad_soma_hidden, grad_readout,
-                loss, hidden_o, readout_o, h_e, h_h)
+                loss, hidden_o, readout_o, h_e, h_h, diagnostics)
+
+    def get_single_sample_diagnostics(self, params: NetworkParamsTwoLayer, x_input: jnp.ndarray, target: int) -> Dict:
+        """Return target, prediction, and gradient-component norms for one sample (for first/last sample logging)."""
+        *_, diagnostics = self._compute_gradients(params, x_input, target, self.gradient_clip)
+        return diagnostics
 
     def _train_step_impl(self, params: NetworkParamsTwoLayer, x_input: jnp.ndarray, target: int,
                          lr_ed: float, lr_es: float, lr_hd: float, lr_hs: float, lr_r: float,
                          clip_value: float = 5.0) -> Tuple:
         (grad_extra_dend, grad_extra_soma, grad_dend_hidden, grad_soma_hidden, grad_readout,
-         loss, hidden_o, readout_o, h_extra, h_hidden) = self._compute_gradients(params, x_input, target, clip_value)
+         loss, hidden_o, readout_o, h_extra, h_hidden, _) = self._compute_gradients(params, x_input, target, clip_value)
 
         # === WEIGHT UPDATES ===
         new_w_dend_extra = jnp.clip(params.w_dend_extra * (1 - self.weight_decay) + lr_ed * grad_extra_dend, -1.0, 1.0)
@@ -387,7 +420,7 @@ class JAXEPropNetworkTwoLayer:
         readout_os_list = []
 
         for i in range(batch_size):
-            (g_ed, g_es, g_hd, g_hs, g_r, loss, h_o, r_o, _, _) = self._compute_gradients(
+            (g_ed, g_es, g_hd, g_hs, g_r, loss, h_o, r_o, _, _, _) = self._compute_gradients(
                 params, x_batch[i], target_batch[i], clip_value
             )
             grad_ed_sum = grad_ed_sum + g_ed
@@ -501,7 +534,31 @@ class JAXEPropNetworkTwoLayer:
         return net
 
 
-def train_network_two_layer(network, train_data, test_data, run_dir, epochs, batch_size, model_name_prefix, random_seed=42):
+def _print_epoch_sample_diagnostics_2layer(d: Dict, label: str):
+    """Print first/last sample diagnostics for 2-layer (target, prediction, gradient norms)."""
+    print(f"  --- {label} ---", flush=True)
+    print(f"    target: {d['target']}  prediction: {d['prediction']}  loss: {d['loss']:.6f}", flush=True)
+    print(f"    Error:        global_errors: {d['global_errors']:.6f}  effective_error_hidden: {d['effective_error_hidden']:.6f}", flush=True)
+    print(f"    Surrogate:    sigma_prime_readout: {d['sigma_prime_readout']:.6f}  sigma_prime_hidden: {d['sigma_prime_hidden']:.6f}  sigma_prime_extra: {d['sigma_prime_extra']:.6f}", flush=True)
+    print(f"                 h_prime_hidden: {d['h_prime_hidden']:.6f}  h_prime_extra: {d['h_prime_extra']:.6f}", flush=True)
+    print(f"    Eligibility:  E_readout: {d['E_readout']:.6f}  E_soma_hidden: {d['E_soma_hidden']:.6f}  E_soma_extra: {d['E_soma_extra']:.6f}", flush=True)
+    print(f"                 dmu_dw_hidden: {d['dmu_dw_hidden']:.6f}  dmu_dw_extra: {d['dmu_dw_extra']:.6f}", flush=True)
+    print(f"    Grad norms:   grad_extra_dend: {d['grad_extra_dend']:.6f}  grad_extra_soma: {d['grad_extra_soma']:.6f}", flush=True)
+    print(f"                 grad_dend_hidden: {d['grad_dend_hidden']:.6f}  grad_soma_hidden: {d['grad_soma_hidden']:.6f}  grad_readout: {d['grad_readout']:.6f}", flush=True)
+
+
+def _apply_spike_dropout(x, p_drop):
+    """Zero out a fraction of non-zero input bins (train-time spike dropout)."""
+    if p_drop <= 0:
+        return x.copy()
+    out = np.asarray(x, dtype=np.float64).copy()
+    nonzero = out != 0
+    drop = np.random.random(out.shape) < p_drop
+    out[nonzero & drop] = 0
+    return out
+
+
+def train_network_two_layer(network, train_data, test_data, run_dir, epochs, batch_size, model_name_prefix, random_seed=42, spike_dropout_prob=0.0):
     """Train two-layer network. train_data/test_data are list of (x, label) with x shape (T, n_inputs)."""
     n_train = len(train_data)
     temp_config = network.config
@@ -518,10 +575,27 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
         f"  weight_decay: {network.weight_decay}, gradient_clip: {network.gradient_clip}",
         "Loss:",
         f"  temperature: {network.loss_temperature}, count_bias: {network.loss_count_bias}, label_smoothing: {network.loss_label_smoothing}",
+        f"Spike dropout: {spike_dropout_prob}",
         "=" * 80, ""
     ]
     with open(os.path.join(run_dir, "hyperparameters.txt"), "w") as f:
         f.write("\n".join(hyperparams_lines))
+
+    # INITIAL EVALUATION (before training)
+    print(f"\n{'='*80}", flush=True)
+    print("INITIAL EVALUATION (BEFORE TRAINING)", flush=True)
+    print(f"{'='*80}", flush=True)
+    initial_res = network.evaluate(test_data)
+    print(f"INITIAL TEST - Loss: {initial_res['avg_loss']:.4f}, Accuracy: {initial_res['accuracy']:.2f}% ({initial_res['correct']}/{initial_res['total']})", flush=True)
+    readout_counts_list = []
+    for x_raw, _ in test_data:
+        x_jax = jnp.array(x_raw)
+        *_, readout_o = network.forward(x_jax)
+        readout_counts_list.append(np.array(jnp.sum(readout_o, axis=0)))
+    readout_counts_arr = np.array(readout_counts_list)
+    ro_mean_per_neuron = np.mean(readout_counts_arr, axis=0)
+    print(f"Average readout firing rate (spikes/neuron/sample): mean = {ro_mean_per_neuron.mean():.2f}  (per neuron: min = {ro_mean_per_neuron.min():.2f}, max = {ro_mean_per_neuron.max():.2f})", flush=True)
+    print(f"{'='*80}\n", flush=True)
 
     best_accuracy = -1.0
     best_model_path = None
@@ -530,6 +604,16 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
     for epoch in range(epochs):
         np.random.seed(random_seed + epoch)
         np.random.shuffle(train_data)
+        # First and last sample of epoch (shuffled order): print target, prediction, gradient-component norms
+        params = network.get_params()
+        x_first, target_first = train_data[0]
+        x_last, target_last = train_data[-1]
+        d_first = network.get_single_sample_diagnostics(params, jnp.asarray(x_first), target_first)
+        d_last = network.get_single_sample_diagnostics(params, jnp.asarray(x_last), target_last)
+        print(f"  Epoch {epoch+1} - First sample (shuffled):", flush=True)
+        _print_epoch_sample_diagnostics_2layer(d_first, "First sample")
+        print(f"  Epoch {epoch+1} - Last sample (shuffled):", flush=True)
+        _print_epoch_sample_diagnostics_2layer(d_last, "Last sample")
         epoch_start = time.time()
         epoch_losses = []
         epoch_correct = 0
@@ -541,7 +625,10 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
             batch_data = train_data[start_idx:end_idx]
             if batch_size == 1:
                 x_arr, target = batch_data[0]
-                x = jnp.asarray(x_arr)
+                x_np = np.asarray(x_arr)
+                if spike_dropout_prob > 0:
+                    x_np = _apply_spike_dropout(x_np, spike_dropout_prob)
+                x = jnp.asarray(x_np)
                 loss, hidden_o, readout_o, _ = network.train_step(x, target)
                 epoch_losses.append(loss)
                 pred = network.predict(x)
@@ -549,7 +636,13 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
                     epoch_correct += 1
                 epoch_total += 1
             else:
-                batch_inputs = jnp.array([x for x, _ in batch_data])
+                batch_inputs_list = []
+                for x_b, _ in batch_data:
+                    x_np = np.asarray(x_b)
+                    if spike_dropout_prob > 0:
+                        x_np = _apply_spike_dropout(x_np, spike_dropout_prob)
+                    batch_inputs_list.append(x_np)
+                batch_inputs = jnp.array(batch_inputs_list)
                 batch_targets = jnp.array([t for _, t in batch_data], dtype=jnp.int32)
                 avg_loss, hidden_os_list, readout_os_list = network.train_step_batch(batch_inputs, batch_targets)
                 for i in range(len(batch_data)):

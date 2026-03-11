@@ -478,7 +478,18 @@ class JAXEPropNetworkTwoLayer:
         return net
 
 
-def train_network_two_layer(network, train_data, test_data, run_dir, epochs, batch_size, model_name_prefix, random_seed=42):
+def _apply_spike_dropout(x, p_drop):
+    """Zero out a fraction of non-zero input bins (train-time spike dropout)."""
+    if p_drop <= 0:
+        return x.copy()
+    out = np.asarray(x, dtype=np.float64).copy()
+    nonzero = out != 0
+    drop = np.random.random(out.shape) < p_drop
+    out[nonzero & drop] = 0
+    return out
+
+
+def train_network_two_layer(network, train_data, test_data, run_dir, epochs, batch_size, model_name_prefix, random_seed=42, spike_dropout_prob=0.0):
     """Train two-layer network. train_data/test_data are list of (x, label) with x shape (T, n_inputs)."""
     n_train = len(train_data)
     temp_config = network.config
@@ -489,10 +500,27 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
         f"  n_inputs: {network.n_inputs}, n_extra: {network.n_extra}, n_hidden: {network.n_hidden}, n_outputs: {network.n_outputs}",
         "Training:",
         f"  Epochs: {epochs}, Batch size: {batch_size}",
+        f"Spike dropout: {spike_dropout_prob}",
         "=" * 80, ""
     ]
     with open(os.path.join(run_dir, "hyperparameters.txt"), "w") as f:
         f.write("\n".join(hyperparams_lines))
+
+    # INITIAL EVALUATION (before training)
+    print(f"\n{'='*80}", flush=True)
+    print("INITIAL EVALUATION (BEFORE TRAINING)", flush=True)
+    print(f"{'='*80}", flush=True)
+    initial_res = network.evaluate(test_data)
+    print(f"INITIAL TEST - Loss: {initial_res['avg_loss']:.4f}, Accuracy: {initial_res['accuracy']:.2f}% ({initial_res['correct']}/{initial_res['total']})", flush=True)
+    readout_counts_list = []
+    for x_raw, _ in test_data:
+        x_jax = jnp.array(x_raw)
+        *_, readout_o = network.forward(x_jax)
+        readout_counts_list.append(np.array(jnp.sum(readout_o, axis=0)))
+    readout_counts_arr = np.array(readout_counts_list)
+    ro_mean_per_neuron = np.mean(readout_counts_arr, axis=0)
+    print(f"Average readout firing rate (spikes/neuron/sample): mean = {ro_mean_per_neuron.mean():.2f}  (per neuron: min = {ro_mean_per_neuron.min():.2f}, max = {ro_mean_per_neuron.max():.2f})", flush=True)
+    print(f"{'='*80}\n", flush=True)
 
     best_accuracy = -1.0
     best_model_path = None
@@ -512,7 +540,10 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
             batch_data = train_data[start_idx:end_idx]
             if batch_size == 1:
                 x_arr, target = batch_data[0]
-                x = jnp.asarray(x_arr)
+                x_np = np.asarray(x_arr)
+                if spike_dropout_prob > 0:
+                    x_np = _apply_spike_dropout(x_np, spike_dropout_prob)
+                x = jnp.asarray(x_np)
                 loss, hidden_o, readout_o, _ = network.train_step(x, target)
                 epoch_losses.append(loss)
                 pred = network.predict(x)
@@ -520,7 +551,8 @@ def train_network_two_layer(network, train_data, test_data, run_dir, epochs, bat
                     epoch_correct += 1
                 epoch_total += 1
             else:
-                batch_inputs = jnp.array([x for x, _ in batch_data])
+                batch_inputs_list = [_apply_spike_dropout(np.asarray(x), spike_dropout_prob) if spike_dropout_prob > 0 else np.asarray(x) for x, _ in batch_data]
+                batch_inputs = jnp.array(batch_inputs_list)
                 batch_targets = jnp.array([t for _, t in batch_data], dtype=jnp.int32)
                 avg_loss, hidden_os_list, readout_os_list = network.train_step_batch(batch_inputs, batch_targets)
                 for i in range(len(batch_data)):

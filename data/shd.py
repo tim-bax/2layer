@@ -183,6 +183,19 @@ def create_shd_input_jax(
     return x_input
 
 
+def apply_spike_dropout(x: np.ndarray, p_drop: float) -> np.ndarray:
+    """Zero out a fraction of non-zero input bins (spike dropout). Use at train time only.
+    x: (T, n_inputs) binned input. p_drop: probability of dropping each non-zero (0 = no dropout).
+    Returns a copy with some non-zero entries set to 0. Uses np.random so each call is different."""
+    if p_drop <= 0:
+        return x.copy()
+    out = np.asarray(x, dtype=np.float64).copy()
+    nonzero = out != 0
+    drop = np.random.random(out.shape) < p_drop
+    out[nonzero & drop] = 0
+    return out
+
+
 def load_shd_data(
     data_path: str = None,
     train_samples_per_class: int = None,
