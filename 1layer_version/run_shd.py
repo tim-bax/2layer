@@ -52,13 +52,19 @@ N_OUTPUTS = 20
 RANDOM_SEED = 12
 EPOCHS = 30
 BATCH_SIZE = 32
+# Readout-only warmup: first N epochs only readout updates (hidden frozen); 0 = off
+WARMUP_READOUT_EPOCHS = 1
 # Learning rates (hidden dendritic, hidden somatic, readout)
 LR_HIDDEN_DEND = 0.045
 LR_HIDDEN_SOMA = 0.00015
 LR_READOUT = 0.035
+# Scale dendritic gradient (1.0 = no change; >1 boosts dendrite updates to balance with soma)
+GRAD_DEND_SCALE = 1.0
 # Regularization & training
 WEIGHT_DECAY = 0.00001
 GRADIENT_CLIP = 5.0
+# Spike dropout: fraction of non-zero input bins to zero out at train time (0 = off)
+SPIKE_DROPOUT = 0.1
 # Loss (softmax temperature, count bias, label smoothing)
 LOSS_TEMPERATURE = 2.7
 LOSS_COUNT_BIAS = 0.18
@@ -66,8 +72,9 @@ LOSS_LABEL_SMOOTHING = 0.13
 # Surrogate gradient: larger beta = gradient more concentrated near spike (defaults 0.36 somatic, 0.75 dend)
 BETA_S = 1.0
 BETA_D = 1.5
-# Weight init scale (Xavier * scale); default 0.15; use ~0.25 to reduce all-zero readout at start
+# Weight init: hidden layer (dend/soma) and optionally readout (larger readout = non-zero initial output, larger effective_error early)
 WEIGHT_SCALE = 0.25
+READOUT_WEIGHT_SCALE = None  # None = use WEIGHT_SCALE; set e.g. 0.4 or 0.5 so readout has variance from the start
 # -----------------------------------------------------------------------------
 
 
@@ -79,17 +86,21 @@ def parse_args():
     p.add_argument("--seed", type=int, default=None, help=f"Random seed (default: {RANDOM_SEED})")
     p.add_argument("--epochs", type=int, default=None, help=f"Epochs (default: {EPOCHS})")
     p.add_argument("--batch_size", type=int, default=None, help=f"Batch size (default: {BATCH_SIZE})")
+    p.add_argument("--warmup_readout_epochs", type=int, default=None, help="First N epochs only readout (0=off)")
     p.add_argument("--lr_hidden_dend", type=float, default=None)
     p.add_argument("--lr_hidden_soma", type=float, default=None)
     p.add_argument("--lr_readout", type=float, default=None)
+    p.add_argument("--grad_dend_scale", type=float, default=None, help="Scale factor for dendritic gradient (default 1.0)")
     p.add_argument("--weight_decay", type=float, default=None)
     p.add_argument("--gradient_clip", type=float, default=None)
+    p.add_argument("--spike_dropout", type=float, default=None, help="Train-time spike dropout rate 0--1 (default 0.1)")
     p.add_argument("--loss_temperature", type=float, default=None)
     p.add_argument("--loss_count_bias", type=float, default=None)
     p.add_argument("--loss_label_smoothing", type=float, default=None)
     p.add_argument("--beta_s", type=float, default=None, help="Somatic surrogate beta (larger = more spike-near)")
     p.add_argument("--beta_d", type=float, default=None, help="Dendritic surrogate beta")
-    p.add_argument("--weight_scale", type=float, default=None, help="Weight init scale (e.g. 0.25 for more initial activity)")
+    p.add_argument("--weight_scale", type=float, default=None, help="Weight init scale for hidden (e.g. 0.25--0.4)")
+    p.add_argument("--readout_weight_scale", type=float, default=None, help="Weight init for readout only (default: same as weight_scale; use 0.4--0.5 for non-zero initial readout)")
     p.add_argument("--lowmemory", action="store_true", help="Use model_lowmemory.py (lower memory, may be slower)")
     args = p.parse_args()
     def _int(name, default): v = getattr(args, name); return v if v is not None else default
@@ -102,17 +113,21 @@ def parse_args():
         "RANDOM_SEED": _int("seed", RANDOM_SEED),
         "EPOCHS": _int("epochs", EPOCHS),
         "BATCH_SIZE": _int("batch_size", BATCH_SIZE),
+        "WARMUP_READOUT_EPOCHS": _int("warmup_readout_epochs", WARMUP_READOUT_EPOCHS),
         "LR_HIDDEN_DEND": _float("lr_hidden_dend", LR_HIDDEN_DEND),
         "LR_HIDDEN_SOMA": _float("lr_hidden_soma", LR_HIDDEN_SOMA),
         "LR_READOUT": _float("lr_readout", LR_READOUT),
+        "GRAD_DEND_SCALE": _float("grad_dend_scale", GRAD_DEND_SCALE),
         "WEIGHT_DECAY": _float("weight_decay", WEIGHT_DECAY),
         "GRADIENT_CLIP": _float("gradient_clip", GRADIENT_CLIP),
+        "SPIKE_DROPOUT": _float("spike_dropout", SPIKE_DROPOUT),
         "LOSS_TEMPERATURE": _float("loss_temperature", LOSS_TEMPERATURE),
         "LOSS_COUNT_BIAS": _float("loss_count_bias", LOSS_COUNT_BIAS),
         "LOSS_LABEL_SMOOTHING": _float("loss_label_smoothing", LOSS_LABEL_SMOOTHING),
         "BETA_S": _float("beta_s", BETA_S),
         "BETA_D": _float("beta_d", BETA_D),
         "WEIGHT_SCALE": _float("weight_scale", WEIGHT_SCALE),
+        "READOUT_WEIGHT_SCALE": _float("readout_weight_scale", READOUT_WEIGHT_SCALE),
     }
 
 
@@ -164,12 +179,14 @@ def main():
     w_dend_np, w_soma_np, w_readout_np = initialize_numpy_weights(
         n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs,
         weight_scale=weight_scale,
+        readout_weight_scale=cfg["READOUT_WEIGHT_SCALE"],
     )
     network = JAXEPropNetwork(
         key, n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs, T=T,
         learning_rate_hidden_dendritic=cfg["LR_HIDDEN_DEND"],
         learning_rate_hidden_somatic=cfg["LR_HIDDEN_SOMA"],
         learning_rate_readout=cfg["LR_READOUT"],
+        grad_dend_scale=cfg["GRAD_DEND_SCALE"],
         weight_decay=cfg["WEIGHT_DECAY"],
         gradient_clip=cfg["GRADIENT_CLIP"],
         loss_temperature=cfg["LOSS_TEMPERATURE"],
@@ -187,9 +204,11 @@ def main():
         "", "1-layer SHD run", "=" * 80,
         f"Random seed: {seed}",
         f"Epochs: {epochs}, Batch size: {batch_size}",
+        f"Warmup readout epochs: {cfg['WARMUP_READOUT_EPOCHS']}",
+        f"grad_dend_scale: {cfg['GRAD_DEND_SCALE']}, spike_dropout: {cfg['SPIKE_DROPOUT']}",
         f"LR hidden dend: {cfg['LR_HIDDEN_DEND']}, soma: {cfg['LR_HIDDEN_SOMA']}, readout: {cfg['LR_READOUT']}",
         f"Loss: temp={cfg['LOSS_TEMPERATURE']}, bias={cfg['LOSS_COUNT_BIAS']}, smoothing={cfg['LOSS_LABEL_SMOOTHING']}",
-        f"beta_s: {cfg['BETA_S']}, beta_d: {cfg['BETA_D']}, weight_scale: {cfg['WEIGHT_SCALE']}",
+        f"beta_s: {cfg['BETA_S']}, beta_d: {cfg['BETA_D']}, weight_scale: {cfg['WEIGHT_SCALE']}, readout_weight_scale: {cfg['READOUT_WEIGHT_SCALE']}",
         "=" * 80, "",
     ]
     with open(os.path.join(run_dir, "hyperparameters.txt"), "w") as f:
@@ -199,6 +218,8 @@ def main():
     epoch_results, final_test_results, best_model_path, best_accuracy = train_network_jax(
         network, train_data, test_data,
         epochs=epochs, batch_size=batch_size, run_dir=run_dir,
+        warmup_readout_epochs=cfg["WARMUP_READOUT_EPOCHS"],
+        spike_dropout_prob=cfg["SPIKE_DROPOUT"],
     )
     model_save_path = os.path.join(run_dir, "shd_2comp_model_jax.pkl")
     network.save(model_save_path)

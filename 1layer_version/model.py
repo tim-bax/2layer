@@ -104,7 +104,8 @@ class JAXEPropNetwork:
                  neuron_config=None,
                  beta_s=None,
                  beta_d=None,
-                 weight_scale=None):
+                 weight_scale=None,
+                 grad_dend_scale=None):
         self.n_inputs = n_inputs
         self.n_hidden = n_hidden
         self.n_outputs = n_outputs
@@ -148,6 +149,7 @@ class JAXEPropNetwork:
             self.weight_decay = weight_decay
         if gradient_clip is not None:
             self.gradient_clip = gradient_clip
+        self.grad_dend_scale = 1.0 if grad_dend_scale is None else float(grad_dend_scale)
         if loss_temperature is not None:
             self.loss_temperature = loss_temperature
         if loss_count_bias is not None:
@@ -419,7 +421,7 @@ class JAXEPropNetwork:
         
         # === UPDATE WEIGHTS ===
         # Apply learning rates and weight decay (using provided learning rates for adaptive behavior)
-        new_w_dend = params.w_dend * (1 - self.weight_decay) + lr_dend * grad_dend_clipped
+        new_w_dend = params.w_dend * (1 - self.weight_decay) + lr_dend * (self.grad_dend_scale * grad_dend_clipped)
         new_w_soma = params.w_soma * (1 - self.weight_decay) + lr_soma * grad_soma_clipped
         new_w_readout = params.w_readout * (1 - self.weight_decay) + lr_readout * grad_readout_clipped
         
@@ -492,12 +494,95 @@ class JAXEPropNetwork:
             "grad_readout": n(grad_readout_raw),
         }
 
-    def train_step(self, x_input: jnp.ndarray, target: int) -> Tuple[float, jnp.ndarray, jnp.ndarray]:
-        """Perform one training step and update network"""
+    def compute_gradients_one_sample(
+        self, params: NetworkParams, x_input: jnp.ndarray, target: int,
+        return_soma_components: bool = False,
+    ):
+        """Compute gradient components and readout surrogate for one sample (no weight update).
+        Returns (grad_dend_raw, grad_soma_raw, grad_readout_raw, sigma_prime_readout, prediction)
+        and if return_soma_components: also component norms, mean (signed) per element, and per-synapse
+        stats: mean_abs_grad_*, elig_*_one_synapse (typical |grad| and eligibility trace magnitude per weight).
+        """
+        mu, v, h, hidden_o, readout_v, readout_o, mu_history, t_prime_history, v_history = self._forward_with_params(params, x_input)
+        prediction = int(jnp.argmax(jnp.sum(readout_o, axis=0)))
+        global_errors = self.compute_global_errors(readout_o, target)
+        E_readout = JAXTwoCompartmentalLayer.compute_eligibility_traces(hidden_o, self.readout_layer.alpha)
+        v_input_vals = readout_v - self.config.v_th
+        sigma_prime_readout = JAXTwoCompartmentalLayer.surrogate_sigma(v_input_vals, self.config.beta_s)
+        grad_readout_raw = jnp.einsum('ti,tj,i->ij', sigma_prime_readout, E_readout, global_errors) / self.T
+        T = x_input.shape[0]
+        n_neurons = h.shape[1]
+        effective_error_time_series = jnp.einsum('tj,j,ji->ti', sigma_prime_readout, global_errors, params.w_readout)
+        soma_input_vals = v_history + self.config.gamma * h - self.config.v_th
+        sigma_prime_hidden = JAXTwoCompartmentalLayer.surrogate_sigma(soma_input_vals, self.config.beta_s)
+        t_prime_indices = t_prime_history.astype(jnp.int32)
+        neuron_indices = jnp.arange(n_neurons)[None, :]
+        mu_at_tprime = mu_history[t_prime_indices, neuron_indices]
+        dend_input_vals = mu_at_tprime - self.config.mu_th
+        h_prime = JAXTwoCompartmentalLayer.surrogate_sigma(dend_input_vals, self.config.beta_d)
+        E_soma = JAXTwoCompartmentalLayer.compute_eligibility_traces(x_input, self.hidden_layer.alpha_s)
+        dmu_tprime_dw = JAXTwoCompartmentalLayer.compute_dmu_tprime_dw(
+            x_input, h, t_prime_history, self.hidden_layer.alpha
+        )
+        grad_soma_raw = jnp.einsum('ti,tj,ti->ij', sigma_prime_hidden, E_soma, effective_error_time_series) / self.T
+        grad_dend_raw = jnp.einsum('ti,ti,tij,ti->ij',
+                                  sigma_prime_hidden, h_prime, dmu_tprime_dw,
+                                  effective_error_time_series * self.config.gamma) / self.T
+        if return_soma_components:
+            n_sigma = float(jnp.linalg.norm(sigma_prime_hidden))
+            n_E_soma = float(jnp.linalg.norm(E_soma))
+            n_eff = float(jnp.linalg.norm(effective_error_time_series))
+            n_h_prime = float(jnp.linalg.norm(h_prime))
+            n_dmu_tprime_dw = float(jnp.linalg.norm(dmu_tprime_dw))  # dendritic "eligibility" (sensitivity)
+            n_E_readout = float(jnp.linalg.norm(E_readout))
+            # Mean (signed) over elements: gradient matrices and all component time series (per-weight / per-element average)
+            mean_grad_dend = float(jnp.mean(grad_dend_raw))
+            mean_grad_soma = float(jnp.mean(grad_soma_raw))
+            mean_grad_readout = float(jnp.mean(grad_readout_raw))
+            mean_sigma = float(jnp.mean(sigma_prime_hidden))
+            mean_E_soma = float(jnp.mean(E_soma))
+            mean_eff = float(jnp.mean(effective_error_time_series))
+            mean_h_prime = float(jnp.mean(h_prime))
+            mean_dmu = float(jnp.mean(dmu_tprime_dw))
+            mean_E_readout = float(jnp.mean(E_readout))
+            mean_sigma_readout = float(jnp.mean(sigma_prime_readout))
+            # Per-weight: typical |gradient| for one synapse (how much one weight moves after one sample, before lr)
+            mean_abs_grad_dend = float(jnp.mean(jnp.abs(grad_dend_raw)))
+            mean_abs_grad_soma = float(jnp.mean(jnp.abs(grad_soma_raw)))
+            mean_abs_grad_readout = float(jnp.mean(jnp.abs(grad_readout_raw)))
+            # Per-synapse eligibility: one trace per weight. Soma: E_soma[:,j] for input j (same for all neurons i).
+            # Typical norm of one such trace: mean over j of ||E_soma[:,j]||
+            E_soma_per_synapse_norms = jnp.linalg.norm(E_soma, axis=0)  # (n_inputs,) L2 over time for each j
+            elig_soma_one_synapse = float(jnp.mean(E_soma_per_synapse_norms))
+            # Dendrite: dmu_tprime_dw[:,i,j] per (i,j). Mean over (i,j) of ||dmu[:,i,j]||
+            dmu_per_synapse_norms = jnp.linalg.norm(dmu_tprime_dw, axis=0)  # (n_neurons, n_inputs)
+            elig_dend_one_synapse = float(jnp.mean(dmu_per_synapse_norms))
+            # Readout: E_readout[:,j] per hidden j. Mean over j of ||E_readout[:,j]||
+            E_readout_per_synapse_norms = jnp.linalg.norm(E_readout, axis=0)  # (n_hidden,)
+            elig_readout_one_synapse = float(jnp.mean(E_readout_per_synapse_norms))
+            return grad_dend_raw, grad_soma_raw, grad_readout_raw, sigma_prime_readout, prediction, (
+                n_sigma, n_E_soma, n_eff, n_h_prime, n_dmu_tprime_dw, n_E_readout,
+                mean_grad_dend, mean_grad_soma, mean_grad_readout,
+                mean_sigma, mean_E_soma, mean_eff, mean_h_prime, mean_dmu, mean_E_readout, mean_sigma_readout,
+                mean_abs_grad_dend, mean_abs_grad_soma, mean_abs_grad_readout,
+                elig_soma_one_synapse, elig_dend_one_synapse, elig_readout_one_synapse,
+            )
+        return grad_dend_raw, grad_soma_raw, grad_readout_raw, sigma_prime_readout, prediction
+
+    def train_step(self, x_input: jnp.ndarray, target: int,
+                   lr_dend: Optional[float] = None, lr_soma: Optional[float] = None, lr_readout: Optional[float] = None,
+                   ) -> Tuple[float, jnp.ndarray, jnp.ndarray]:
+        """Perform one training step and update network.
+        Optional lr_* override learning rates (e.g. 0 for readout-only warmup)."""
         params = self.get_params()
         
-        # Get balanced learning rates (adaptive based on activity history)
-        lr_dend, lr_soma, lr_readout = self.get_balanced_learning_rates()
+        if lr_dend is None and lr_soma is None and lr_readout is None:
+            lr_dend, lr_soma, lr_readout = self.get_balanced_learning_rates()
+        else:
+            base_dend, base_soma, base_readout = self.get_balanced_learning_rates()
+            lr_dend = lr_dend if lr_dend is not None else base_dend
+            lr_soma = lr_soma if lr_soma is not None else base_soma
+            lr_readout = lr_readout if lr_readout is not None else base_readout
         
         new_params, loss, hidden_o, readout_o = self._train_step_compiled(
             params, x_input, target, lr_dend, lr_soma, lr_readout, self.gradient_clip
@@ -516,8 +601,11 @@ class JAXEPropNetwork:
         
         return float(loss), hidden_o, readout_o
     
-    def train_step_batch(self, x_input_batch: jnp.ndarray, target_batch: jnp.ndarray) -> Tuple[float, List[jnp.ndarray], List[jnp.ndarray]]:
-        """Perform training step on a batch of samples (faster than sequential train_step calls)
+    def train_step_batch(self, x_input_batch: jnp.ndarray, target_batch: jnp.ndarray,
+                        lr_dend: Optional[float] = None, lr_soma: Optional[float] = None, lr_readout: Optional[float] = None,
+                        ) -> Tuple[float, List[jnp.ndarray], List[jnp.ndarray]]:
+        """Perform training step on a batch of samples (faster than sequential train_step calls).
+        Optional lr_* override learning rates (e.g. 0 for readout-only warmup).
         
         Args:
             x_input_batch: (batch_size, T, n_inputs) input batch
@@ -528,8 +616,13 @@ class JAXEPropNetwork:
         """
         params = self.get_params()
         
-        # Get balanced learning rates
-        lr_dend, lr_soma, lr_readout = self.get_balanced_learning_rates()
+        if lr_dend is None and lr_soma is None and lr_readout is None:
+            lr_dend, lr_soma, lr_readout = self.get_balanced_learning_rates()
+        else:
+            base_dend, base_soma, base_readout = self.get_balanced_learning_rates()
+            lr_dend = lr_dend if lr_dend is not None else base_dend
+            lr_soma = lr_soma if lr_soma is not None else base_soma
+            lr_readout = lr_readout if lr_readout is not None else base_readout
         
         # Compute gradients for each sample, then average
         def compute_grads(x_input, target):
@@ -605,7 +698,7 @@ class JAXEPropNetwork:
         grad_readout_clipped = jnp.clip(grad_readout_avg, -self.gradient_clip, self.gradient_clip)
         
         # Update weights using averaged gradients
-        new_w_dend = params.w_dend * (1 - self.weight_decay) + lr_dend * grad_dend_clipped
+        new_w_dend = params.w_dend * (1 - self.weight_decay) + lr_dend * (self.grad_dend_scale * grad_dend_clipped)
         new_w_soma = params.w_soma * (1 - self.weight_decay) + lr_soma * grad_soma_clipped
         new_w_readout = params.w_readout * (1 - self.weight_decay) + lr_readout * grad_readout_clipped
         
@@ -853,7 +946,7 @@ def _print_epoch_sample_diagnostics_1layer(d: Dict, label: str):
 
 def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarray, int]],
                      test_data: List[Tuple[np.ndarray, int]], epochs: int = 10, batch_size: int = 32,
-                     run_dir: str = "model"):
+                     run_dir: str = "model", warmup_readout_epochs: int = 0, spike_dropout_prob: float = 0.0):
     """Train the JAX network with epochs and test evaluation after each epoch.
     Expects train_data/test_data as list of (x, label) with x shape (T, n_inputs).
     
@@ -863,7 +956,10 @@ def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarra
         test_data: List of (input, label) tuples; input is (T, n_inputs) array
         epochs: Number of training epochs
         batch_size: Batch size for training (default: 32). Use batch_size=1 for single-sample training.
+        warmup_readout_epochs: If > 0, only update readout for the first this many epochs (hidden frozen).
+        spike_dropout_prob: Train-time spike dropout rate (0 = off); fraction of non-zero input bins zeroed.
     """
+    from data import apply_spike_dropout
     print(f"Training JAX network with {len(train_data)} training samples...", flush=True)
     print(f"Test set: {len(test_data)} samples (evaluated after each epoch)", flush=True)
     print(f"Network architecture: {network.n_inputs} inputs → {network.n_hidden} hidden → {network.n_outputs} outputs", flush=True)
@@ -871,6 +967,10 @@ def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarra
     print(f"  - Epochs: {epochs} (each epoch uses all {len(train_data)} training samples)", flush=True)
     print(f"  - Batch size: {batch_size} (using {'batched' if batch_size > 1 else 'single-sample'} training)", flush=True)
     print(f"  - Test evaluation: After each epoch", flush=True)
+    if warmup_readout_epochs > 0:
+        print(f"  - Readout warmup: first {warmup_readout_epochs} epoch(s) only readout updates (hidden frozen)", flush=True)
+    if spike_dropout_prob > 0:
+        print(f"  - Spike dropout: {spike_dropout_prob:.2f} (train only)", flush=True)
     
     # INITIAL EVALUATION: Test before training to verify baseline performance
     print(f"\n{'='*80}", flush=True)
@@ -883,6 +983,15 @@ def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarra
     if initial_test_results['accuracy'] > 15.0:
         print(f"WARNING: Initial accuracy ({initial_test_results['accuracy']:.2f}%) is suspiciously high!", flush=True)
         print(f"This might indicate the model is already trained or there's a data leakage issue.", flush=True)
+    # Average readout firing rate over test set (spikes per neuron per sample)
+    readout_counts_list = []
+    for x_input, _ in test_data:
+        x_jax = jnp.array(np.asarray(x_input))
+        _, _, _, _, _, readout_o, _, _, _ = network.forward(x_jax)
+        readout_counts_list.append(np.array(jnp.sum(readout_o, axis=0)))
+    readout_counts_arr = np.array(readout_counts_list)  # (n_test, n_outputs)
+    ro_mean_per_neuron = np.mean(readout_counts_arr, axis=0)
+    print(f"Average readout firing rate (spikes/neuron/sample): mean = {ro_mean_per_neuron.mean():.2f}  (per neuron: min = {ro_mean_per_neuron.min():.2f}, max = {ro_mean_per_neuron.max():.2f})", flush=True)
     print(f"{'='*80}\n", flush=True)
     
     # Store initial weight norms for tracking changes
@@ -937,6 +1046,11 @@ def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarra
         print(f"  Epoch {epoch+1} - Last sample (shuffled):", flush=True)
         _print_epoch_sample_diagnostics_1layer(d_last, "Last sample")
         
+        # Readout-only warmup: freeze hidden layers for first warmup_readout_epochs
+        lr_override = None
+        if warmup_readout_epochs > 0 and epoch < warmup_readout_epochs:
+            lr_override = (0.0, 0.0, None)  # lr_dend=0, lr_soma=0, lr_readout=default
+        
         epoch_losses = []
         epoch_correct = 0
         epoch_total = 0
@@ -968,8 +1082,14 @@ def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarra
             if batch_size == 1:
                 # Single sample mode (for compatibility/debugging)
                 x_input, target = batch_data[0]
-                x_network_jax = jnp.array(np.asarray(x_input))  # already (T, n_inputs)
-                loss, hidden_o, readout_o = network.train_step(x_network_jax, target)
+                x_np = np.asarray(x_input)
+                if spike_dropout_prob > 0:
+                    x_np = apply_spike_dropout(x_np, spike_dropout_prob)
+                x_network_jax = jnp.array(x_np)  # already (T, n_inputs)
+                lr_d, lr_s, lr_r = (lr_override or (None, None, None))
+                loss, hidden_o, readout_o = network.train_step(
+                    x_network_jax, target, lr_dend=lr_d, lr_soma=lr_s, lr_readout=lr_r
+                )
                 hidden_os = [hidden_o]
                 readout_os = [readout_o]
                 batch_targets = [target]
@@ -981,6 +1101,8 @@ def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarra
                 
                 for x_input, target in batch_data:
                     x_network = np.asarray(x_input)  # already (T, n_inputs)
+                    if spike_dropout_prob > 0:
+                        x_network = apply_spike_dropout(x_network, spike_dropout_prob)
                     batch_inputs.append(x_network)
                     batch_targets.append(target)
                 
@@ -988,8 +1110,11 @@ def train_network_jax(network: JAXEPropNetwork, train_data: List[Tuple[np.ndarra
                 x_batch = jnp.array(batch_inputs)  # (batch_size, T, n_inputs)
                 target_batch = jnp.array(batch_targets, dtype=jnp.int32)  # (batch_size,)
                 
-                # Training step on batch
-                avg_loss, hidden_os, readout_os = network.train_step_batch(x_batch, target_batch)
+                # Training step on batch (optionally with readout-only warmup lr overrides)
+                lr_d, lr_s, lr_r = (lr_override or (None, None, None))
+                avg_loss, hidden_os, readout_os = network.train_step_batch(
+                    x_batch, target_batch, lr_dend=lr_d, lr_soma=lr_s, lr_readout=lr_r
+                )
                 batch_losses = [avg_loss] * actual_batch_size  # Use average loss for each sample in batch
             
             # Process predictions and statistics for each sample in batch
