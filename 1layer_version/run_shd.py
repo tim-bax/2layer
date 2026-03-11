@@ -101,6 +101,7 @@ def parse_args():
     p.add_argument("--beta_d", type=float, default=None, help="Dendritic surrogate beta")
     p.add_argument("--weight_scale", type=float, default=None, help="Weight init scale for hidden (e.g. 0.25--0.4)")
     p.add_argument("--readout_weight_scale", type=float, default=None, help="Weight init for readout only (default: same as weight_scale; use 0.4--0.5 for non-zero initial readout)")
+    p.add_argument("--pkl", type=str, default=None, help="Path to existing .pkl model to resume training (optional)")
     p.add_argument("--lowmemory", action="store_true", help="Use model_lowmemory.py (lower memory, may be slower)")
     args = p.parse_args()
     def _int(name, default): v = getattr(args, name); return v if v is not None else default
@@ -128,6 +129,7 @@ def parse_args():
         "BETA_D": _float("beta_d", BETA_D),
         "WEIGHT_SCALE": _float("weight_scale", WEIGHT_SCALE),
         "READOUT_WEIGHT_SCALE": _float("readout_weight_scale", READOUT_WEIGHT_SCALE),
+        "PKL_PATH": getattr(args, "pkl", None),
     }
 
 
@@ -173,45 +175,68 @@ def main():
     n_inputs = train_data[0][0].shape[1]
 
     print(f"Train: {len(train_data)}, Test: {len(test_data)}, n_inputs: {n_inputs}", flush=True)
-    print(f"Creating network and initializing weights...", flush=True)
-    np.random.seed(seed)
-    weight_scale = cfg["WEIGHT_SCALE"]
-    readout_scale = cfg["READOUT_WEIGHT_SCALE"]
-    try:
-        w_dend_np, w_soma_np, w_readout_np = initialize_numpy_weights(
-            n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs,
-            weight_scale=weight_scale,
-            readout_weight_scale=readout_scale,
-        )
-    except TypeError as e:
-        if "readout_weight_scale" in str(e) or "unexpected keyword" in str(e).lower():
-            # Older layer module (e.g. 2comp_uniform before optional readout scale was added)
+
+    pkl_path = cfg.get("PKL_PATH")
+    if pkl_path and os.path.isfile(pkl_path):
+        print(f"Loading existing model from {pkl_path} (resume training)...", flush=True)
+        network = JAXEPropNetwork.load(pkl_path, key=key)
+        if network.T != T or network.n_inputs != n_inputs:
+            raise ValueError(
+                f"Resume failed: loaded model has T={network.T}, n_inputs={network.n_inputs}; "
+                f"data has T={T}, n_inputs={n_inputs}. Use same T (and data) as when the pkl was saved."
+            )
+        n_hidden, n_outputs = network.n_hidden, network.n_outputs
+        network.learning_rate_hidden_dendritic = cfg["LR_HIDDEN_DEND"]
+        network.learning_rate_hidden_somatic = cfg["LR_HIDDEN_SOMA"]
+        network.learning_rate_readout = cfg["LR_READOUT"]
+        network.grad_dend_scale = cfg["GRAD_DEND_SCALE"]
+        network.weight_decay = cfg["WEIGHT_DECAY"]
+        network.gradient_clip = cfg["GRADIENT_CLIP"]
+        network.loss_temperature = cfg["LOSS_TEMPERATURE"]
+        network.loss_count_bias = cfg["LOSS_COUNT_BIAS"]
+        network.loss_label_smoothing = cfg["LOSS_LABEL_SMOOTHING"]
+        print(f"  Applied LRs: dend={cfg['LR_HIDDEN_DEND']}, soma={cfg['LR_HIDDEN_SOMA']}, readout={cfg['LR_READOUT']}", flush=True)
+    else:
+        if pkl_path:
+            print(f"Warning: --pkl {pkl_path} not found or not a file; initializing new weights.", flush=True)
+        print(f"Creating network and initializing weights...", flush=True)
+        np.random.seed(seed)
+        weight_scale = cfg["WEIGHT_SCALE"]
+        readout_scale = cfg["READOUT_WEIGHT_SCALE"]
+        try:
             w_dend_np, w_soma_np, w_readout_np = initialize_numpy_weights(
                 n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs,
                 weight_scale=weight_scale,
+                readout_weight_scale=readout_scale,
             )
-            if readout_scale is not None:
-                print("Note: readout_weight_scale ignored (layer module does not support it).", flush=True)
-        else:
-            raise
-    network = JAXEPropNetwork(
-        key, n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs, T=T,
-        learning_rate_hidden_dendritic=cfg["LR_HIDDEN_DEND"],
-        learning_rate_hidden_somatic=cfg["LR_HIDDEN_SOMA"],
-        learning_rate_readout=cfg["LR_READOUT"],
-        grad_dend_scale=cfg["GRAD_DEND_SCALE"],
-        weight_decay=cfg["WEIGHT_DECAY"],
-        gradient_clip=cfg["GRADIENT_CLIP"],
-        loss_temperature=cfg["LOSS_TEMPERATURE"],
-        loss_count_bias=cfg["LOSS_COUNT_BIAS"],
-        loss_label_smoothing=cfg["LOSS_LABEL_SMOOTHING"],
-        beta_s=cfg["BETA_S"],
-        beta_d=cfg["BETA_D"],
-        weight_scale=weight_scale,
-    )
-    network.hidden_layer.w_dend = jax.numpy.array(w_dend_np)
-    network.hidden_layer.w_soma = jax.numpy.array(w_soma_np)
-    network.readout_layer.w = jax.numpy.array(w_readout_np)
+        except TypeError as e:
+            if "readout_weight_scale" in str(e) or "unexpected keyword" in str(e).lower():
+                w_dend_np, w_soma_np, w_readout_np = initialize_numpy_weights(
+                    n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs,
+                    weight_scale=weight_scale,
+                )
+                if readout_scale is not None:
+                    print("Note: readout_weight_scale ignored (layer module does not support it).", flush=True)
+            else:
+                raise
+        network = JAXEPropNetwork(
+            key, n_inputs=n_inputs, n_hidden=n_hidden, n_outputs=n_outputs, T=T,
+            learning_rate_hidden_dendritic=cfg["LR_HIDDEN_DEND"],
+            learning_rate_hidden_somatic=cfg["LR_HIDDEN_SOMA"],
+            learning_rate_readout=cfg["LR_READOUT"],
+            grad_dend_scale=cfg["GRAD_DEND_SCALE"],
+            weight_decay=cfg["WEIGHT_DECAY"],
+            gradient_clip=cfg["GRADIENT_CLIP"],
+            loss_temperature=cfg["LOSS_TEMPERATURE"],
+            loss_count_bias=cfg["LOSS_COUNT_BIAS"],
+            loss_label_smoothing=cfg["LOSS_LABEL_SMOOTHING"],
+            beta_s=cfg["BETA_S"],
+            beta_d=cfg["BETA_D"],
+            weight_scale=weight_scale,
+        )
+        network.hidden_layer.w_dend = jax.numpy.array(w_dend_np)
+        network.hidden_layer.w_soma = jax.numpy.array(w_soma_np)
+        network.readout_layer.w = jax.numpy.array(w_readout_np)
 
     hyperparams_lines = [
         "", "1-layer SHD run", "=" * 80,
