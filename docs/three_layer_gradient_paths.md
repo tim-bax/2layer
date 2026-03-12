@@ -236,3 +236,100 @@ Viewed as “readout → … → target weight”:
 14. **Readout → L3 dend → L2 dend → L1 dend** → L3 at t′_3; L2 dend at t′_2; **L1 at t′_2**.  
 
 So in 3-layer you get **soma–soma–soma**, **soma–soma–dend**, **soma–dend–soma**, **soma–dend–dend**, **dend–soma–soma**, **dend–soma–dend**, **dend–dend–soma**, **dend–dend–dend**, each with the correct t / t′ as above.
+
+---
+
+## Tree: three hidden layers (L1 → L2 → L3 → readout)
+
+Each node is “effective error into this layer”; edges are “through that layer’s **soma**” or “through that layer’s **dendrite**”. Times are read **outer → inner**: e.g. **t′₁ at t′₂ at t** means at wall-clock **t**, at parent time **t′₂**, we use the value from **t′₁** (layer’s own plateau).
+
+**Time inheritance:**
+
+- **Soma edge**: pass down **all t** (time context unchanged).
+- **Dendrite edge**: pass down **t′_{ℓ+1} at t**; everything below is evaluated at the parent’s t′. In the **final dendritic gradient** we use **t′_layer at t′_parent at t** (value from that layer’s plateau, read at parent’s time).
+
+---
+
+### Tree with times (three hidden layers)
+
+```
+                              [global error δ]
+                                      │
+                  ┌───────────────────┴───────────────────┐
+                  │                                       │
+            L3 soma                                L3 dend
+            time: t                                time: t′₃ at t
+                  │                                       │
+          L3 grad: σ′₃,E₃ at t                   L3 grad: σ′₃,h′₃,dμ₃/dw at t′₃
+          dend: h′₃,dμ₃ at t′₃ at t              (all at t′₃)
+                  │                                       │
+        to L2 at t                    to L2 at t′₃ at t
+                  │                                       │
+        ┌─────────┴─────────┐                 ┌───────────┴───────────┐
+        │                   │                 │                       │
+   L2 soma             L2 dend           L2 soma                 L2 dend
+   time: t             time: t           time: t′₃ at t           time: t′₃ at t
+        │                   │                 │                       │
+   L2: σ′₂,E₂ at t    L2 dend:          L2: σ′₂,E₂ at t′₃      L2 dend:
+   L2 dend: t′₂ at t  t′₂ at t               L2 dend: t′₂ at t′₃   t′₂ at t′₃ at t
+        │                   │                 │                       │
+   to L1 at t          to L1 at t         to L1 at t′₃          to L1 at t′₂
+        │                   │                 │                       │
+   ┌────┴────┐         ┌────┴────┐       ┌────┴────┐             ┌────┴────┐
+   │         │         │         │       │         │             │         │
+ L1 s     L1 d       L1 s     L1 d     L1 s     L1 d           L1 s     L1 d
+   t    t′₁ at t       t    t′₁ at t   t′₃   t′₁ at t′₃       t′₂   t′₁ at t′₂ at t
+```
+
+**Leaf legend (L1):**
+
+- **L1 soma**: σ′₁, E₁ at the time shown.
+- **L1 dend**: dendritic gradient uses **t′₁ at (parent time) at t** — i.e. value from L1’s plateau (t′₁), read at the parent’s time (t or t′₂ or t′₃), outer t.
+
+---
+
+### Compact tree (times only)
+
+L2 **soma** is always evaluated at the inherited time: **t** when we came through L3 soma (S–S), **t′₃ at t** when we came through L3 dend (D–S). L2 **dend** uses that same inherited time, with L2’s own dendritic terms at t′₂ in that context.
+
+```
+                         [δ]
+                          │
+              ┌───────────┴───────────┐
+              │                       │
+         L3 S                      L3 D
+          t                      t′₃ at t
+              │                       │
+        ┌─────┴─────┐           ┌─────┴─────┐
+        │           │           │           │
+   L2 S       L2 D         L2 S       L2 D
+    t          t         t′₃ at t   t′₃ at t
+             t′₂ at t              t′₂ at t′₃ at t
+        │           │           │           │
+   ┌────┴────┐ ┌────┴────┐ ┌────┴────┐ ┌────┴────┐
+   │         │ │         │ │         │ │         │
+ L1 s   L1 d L1 s   L1 d L1 s   L1 d L1 s   L1 d
+  t   t′₁@t   t   t′₁@t  t′₃  t′₁@t′₃ t′₂  t′₁@t′₂@t
+```
+
+- **Left (L3 S)**: L2 S at **t**, L2 D at **t** with dend **t′₂ at t**.  
+- **Right (L3 D)**: L2 S at **t′₃ at t**, L2 D at **t′₃ at t** with dend **t′₂ at t′₃ at t**.
+
+Notation: **t′₁@t** = t′₁ at t (L1 dend uses own t′₁ in context t); **t′₁@t′₂@t** = t′₁ at t′₂ at t (L1 dend: value from t′₁, read at t′₂, outer t).
+
+---
+
+### Summary table (all 8 paths)
+
+| Path (R → L3 → L2 → L1) | L3 time   | L2 time      | L1 time (soma / dend gradient) | L1 dend gradient (h′, dμ/dw) |
+|--------------------------|-----------|--------------|---------------------------------|------------------------------|
+| S → S → S                | t         | t            | t                               | **t′₁ at t**                 |
+| S → S → D                | t         | t            | t                               | **t′₁ at t**                 |
+| S → D → S                | t         | t; dend t′₂  | **t′₂**                         | —                            |
+| S → D → D                | t         | t; dend t′₂  | **t′₂** (σ′,E at t′₂)           | **t′₁ at t′₂ at t**          |
+| D → S → S                | t′₃ at t  | t′₃          | t′₃                             | —                            |
+| D → S → D                | t′₃ at t  | t′₃          | t′₃ (σ′,E at t′₃)               | **t′₁ at t′₃ at t**          |
+| D → D → S                | t′₃ at t  | t′₃; dend t′₂ | **t′₂**                         | —                            |
+| D → D → D                | t′₃ at t  | t′₃; dend t′₂ | **t′₂** (σ′,E at t′₂)           | **t′₁ at t′₂ at t**          |
+
+So: **dendrite path** locks the layer below to the parent’s **t′**; in the **final dendritic gradient** we always use **t′_layer at t′_parent at t** (value from that layer’s plateau, read at parent’s time, outer t).
