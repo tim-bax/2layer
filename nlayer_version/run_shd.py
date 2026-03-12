@@ -113,8 +113,13 @@ def parse_args():
 def predict(net: JAXEPropNetworkNLayer, x) -> int:
     """Predicted class for one input (T, n_inputs)."""
     _, readout_o = net.forward(x)
+    return _pred_from_readout_o(readout_o, net.loss_temperature, net.loss_count_bias)
+
+
+def _pred_from_readout_o(readout_o, loss_temperature: float, loss_count_bias: float) -> int:
+    """Predicted class from readout spike counts (no extra forward). Use this when you already have readout_o from train_step."""
     counts = np.sum(np.asarray(readout_o), axis=0)
-    scaled = counts / net.loss_temperature + net.loss_count_bias
+    scaled = counts / loss_temperature + loss_count_bias
     probs = np.exp(scaled - np.max(scaled)) / np.sum(np.exp(scaled - np.max(scaled)))
     return int(np.argmax(probs))
 
@@ -267,9 +272,9 @@ def main():
             y_batch = train_targets[idx]
 
             for b in range(x_batch.shape[0]):
-                loss, _ = network.train_step(x_batch[b], int(y_batch[b]))
+                loss, readout_o = network.train_step(x_batch[b], int(y_batch[b]))
                 epoch_losses.append(loss)
-                pred = predict(network, x_batch[b])
+                pred = _pred_from_readout_o(readout_o, network.loss_temperature, network.loss_count_bias)
                 if pred == int(y_batch[b]):
                     epoch_correct += 1
                 epoch_total += 1
