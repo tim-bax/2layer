@@ -64,6 +64,8 @@ class JAXEPropNetworkNLayer:
         loss_temperature: Optional[float] = None,
         loss_count_bias: Optional[float] = None,
         loss_label_smoothing: Optional[float] = None,
+        beta_s: Optional[float] = None,
+        beta_d: Optional[float] = None,
     ):
         self.n_inputs = n_inputs
         self.layer_sizes = list(layer_sizes)
@@ -71,6 +73,10 @@ class JAXEPropNetworkNLayer:
         self.n_outputs = n_outputs
         self.T = T
         self.config = NeuronConfig()
+        if beta_s is not None:
+            self.config = self.config.replace(beta_s=beta_s)
+        if beta_d is not None:
+            self.config = self.config.replace(beta_d=beta_d)
 
         if self.L < 1:
             raise ValueError("Need at least one 2comp layer (layer_sizes non-empty).")
@@ -314,7 +320,10 @@ class JAXEPropNetworkNLayer:
 
 
 # JIT-compiled train step (learning rates as arrays so no recompile per LR)
-JAXEPropNetworkNLayer._train_step_compiled = jit(JAXEPropNetworkNLayer._train_step_impl)
+# static_argnums=(0,) so self (the network instance) is not traced
+JAXEPropNetworkNLayer._train_step_compiled = jit(
+    JAXEPropNetworkNLayer._train_step_impl, static_argnums=(0,)
+)
 
 
 def train_network_n_layer(

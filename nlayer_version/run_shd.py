@@ -42,6 +42,8 @@ GRADIENT_CLIP = 5.0
 LOSS_TEMPERATURE = 5.0
 LOSS_COUNT_BIAS = 0.1
 LOSS_LABEL_SMOOTHING = 0.2
+BETA_S = 0.36   # Somatic surrogate (super-spike); larger = gradient more concentrated near threshold
+BETA_D = 0.75   # Dendritic surrogate
 # -----------------------------------------------------------------------------
 
 
@@ -51,7 +53,7 @@ def parse_args():
     p.add_argument("--n_layers", type=int, default=None, help=f"Number of 2comp layers (default: {N_LAYERS})")
     p.add_argument("--n_hidden", type=int, default=None, help=f"Neurons per layer (default: {N_HIDDEN})")
     p.add_argument("--layer_sizes", type=str, default=None,
-                   help="Comma-separated layer sizes, e.g. 42,40,40 (overrides n_layers and n_hidden)")
+                   help="Comma-separated layer sizes, e.g. 42,40,40 or '17, 14, 12' (no spaces, or quote the list)")
     p.add_argument("--n_outputs", type=int, default=None, help=f"Output classes (default: {N_OUTPUTS})")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--epochs", type=int, default=None)
@@ -64,6 +66,8 @@ def parse_args():
     p.add_argument("--loss_temperature", type=float, default=None)
     p.add_argument("--loss_count_bias", type=float, default=None)
     p.add_argument("--loss_label_smoothing", type=float, default=None)
+    p.add_argument("--beta_s", type=float, default=None, help=f"Somatic surrogate beta (default: {BETA_S})")
+    p.add_argument("--beta_d", type=float, default=None, help=f"Dendritic surrogate beta (default: {BETA_D})")
     args = p.parse_args()
 
     def _int(name, default):
@@ -77,7 +81,7 @@ def parse_args():
     n_layers = _int("n_layers", N_LAYERS)
     n_hidden = _int("n_hidden", N_HIDDEN)
     if args.layer_sizes is not None:
-        layer_sizes = [int(x) for x in args.layer_sizes.split(",")]
+        layer_sizes = [int(x.strip()) for x in args.layer_sizes.split(",")]
         n_layers = len(layer_sizes)
     else:
         layer_sizes = [n_hidden] * n_layers
@@ -98,6 +102,8 @@ def parse_args():
         "LOSS_TEMPERATURE": _float("loss_temperature", LOSS_TEMPERATURE),
         "LOSS_COUNT_BIAS": _float("loss_count_bias", LOSS_COUNT_BIAS),
         "LOSS_LABEL_SMOOTHING": _float("loss_label_smoothing", LOSS_LABEL_SMOOTHING),
+        "BETA_S": _float("beta_s", BETA_S),
+        "BETA_D": _float("beta_d", BETA_D),
     }
 
 
@@ -153,6 +159,8 @@ def main():
         loss_temperature=cfg["LOSS_TEMPERATURE"],
         loss_count_bias=cfg["LOSS_COUNT_BIAS"],
         loss_label_smoothing=cfg["LOSS_LABEL_SMOOTHING"],
+        beta_s=cfg["BETA_S"],
+        beta_d=cfg["BETA_D"],
     )
 
     print(f"N-layer SHD: L={cfg['N_LAYERS']} layers, sizes={layer_sizes}", flush=True)
