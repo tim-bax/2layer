@@ -46,7 +46,19 @@ LOSS_COUNT_BIAS = 0.1
 LOSS_LABEL_SMOOTHING = 0.2
 BETA_S = 0.36   # Somatic surrogate (super-spike); larger = gradient more concentrated near threshold
 BETA_D = 0.75   # Dendritic surrogate
+SPIKE_DROPOUT = 0.1   # Train-time spike dropout (0 = off); zero out fraction of non-zero input bins
 # -----------------------------------------------------------------------------
+
+
+def _apply_spike_dropout(x, p_drop):
+    """Zero out a fraction of non-zero input bins (train-time spike dropout)."""
+    if p_drop <= 0:
+        return x.copy()
+    out = np.asarray(x, dtype=np.float64).copy()
+    nonzero = out != 0
+    drop = np.random.random(out.shape) < p_drop
+    out[nonzero & drop] = 0
+    return out
 
 
 def parse_args():
@@ -72,6 +84,7 @@ def parse_args():
     p.add_argument("--beta_d", type=float, default=None, help=f"Dendritic surrogate beta (default: {BETA_D})")
     p.add_argument("--no_kernel", action="store_true", help="Input: use_kernel=False (no alpha kernel)")
     p.add_argument("--spike_amplitude", type=float, default=None, help="Spike amplitude when --no_kernel (default: 5.0)")
+    p.add_argument("--spike_dropout", type=float, default=None, help="Train-time spike dropout 0--1 (default: 0.1)")
     args = p.parse_args()
 
     def _int(name, default):
@@ -110,6 +123,7 @@ def parse_args():
         "BETA_D": _float("beta_d", BETA_D),
         "NO_KERNEL": getattr(args, "no_kernel", False),
         "SPIKE_AMPLITUDE": getattr(args, "spike_amplitude", None),
+        "SPIKE_DROPOUT": _float("spike_dropout", SPIKE_DROPOUT),
     }
 
 
@@ -176,6 +190,7 @@ def main():
     )
 
     # --- Print hyperparameters ---
+    spike_dropout = cfg.get("SPIKE_DROPOUT", 0.0)
     hyperparams_lines = [
         "",
         "N-layer SHD run",
@@ -184,6 +199,7 @@ def main():
         f"Random seed: {seed}",
         f"Input: use_kernel={not cfg.get('NO_KERNEL', False)}" + (f", spike_amplitude={cfg.get('SPIKE_AMPLITUDE')}" if cfg.get("SPIKE_AMPLITUDE") is not None else ""),
         f"Epochs: {epochs}, Batch size: {batch_size}",
+        f"Spike dropout: {spike_dropout}",
         f"LR dend: {cfg['LR_DEND']}, soma: {cfg['LR_SOMA']}, readout: {cfg['LR_READOUT']}",
         f"weight_decay: {cfg['WEIGHT_DECAY']}, gradient_clip: {cfg['GRADIENT_CLIP']}",
         f"Loss: temperature={cfg['LOSS_TEMPERATURE']}, count_bias={cfg['LOSS_COUNT_BIAS']}, label_smoothing={cfg['LOSS_LABEL_SMOOTHING']}",
@@ -197,7 +213,7 @@ def main():
     with open(os.path.join(run_dir, "hyperparameters.txt"), "w") as f:
         f.write("\n".join(hyperparams_lines))
         f.write(f"\nn_layers={cfg['N_LAYERS']}\nlayer_sizes={layer_sizes}\nn_inputs={n_inputs}\nn_outputs={n_outputs}\n")
-        f.write(f"T={T}\nepochs={epochs}\nbatch_size={batch_size}\nseed={seed}\n")
+        f.write(f"T={T}\nepochs={epochs}\nbatch_size={batch_size}\nseed={seed}\nspike_dropout={spike_dropout}\n")
 
     # --- Training with progress (samples/s and ETA) ---
     print("Training...", flush=True)
@@ -217,7 +233,10 @@ def main():
             x_batch = train_inputs[idx]
             y_batch = train_targets[idx]
             for b in range(x_batch.shape[0]):
-                loss, _ = network.train_step(x_batch[b], int(y_batch[b]))
+                x_b = np.asarray(x_batch[b])
+                if spike_dropout > 0:
+                    x_b = _apply_spike_dropout(x_b, spike_dropout)
+                loss, _ = network.train_step(x_b, int(y_batch[b]))
                 epoch_loss += loss
                 n_batches += 1
                 if n_batches % progress_interval == 0 or n_batches == 1:
