@@ -216,6 +216,26 @@ So the only “special” times are the **plateau times t′_ℓ** of each layer
 
 ---
 
+## Model confirmation (nlayer.py) and plot interpretation
+
+**Code.** In `nlayer_version/nlayer.py`, `_compute_gradients` does the following (lines 222–253):
+
+- **Top layer (L3):** Dendritic gradient uses σ′₃(t), h′₃(t), dμ₃/dw(t), e₃(t) summed over t; the dendritic terms are defined by L3’s plateau at **t′₃**.
+- **Lower layers (ell = 1, 2):** `t_prime_next_int = layer_outputs[ell_next][5]` is the layer-above’s t′ (shape (T, n_next)). Then:
+  - `sigma_ell_at_tprime_next = sigma_primes[ell][t_prime_next_int]` → **σ′_ℓ at t′_{ℓ+1}**
+  - `E_ell_at_tprime_next`, `h_ell_at_tprime_next`, `dmu_ell_at_tprime_next` → **E_ℓ, h′_ℓ, dμ_ℓ/dw at t′_{ℓ+1}**
+  So when the gradient goes through the **dendrite of layer ℓ+1**, layer ℓ’s quantities are evaluated at **t′_{ℓ+1}**. That confirms: L3 dend at **t′₃**; L2 (for that path) at **t′₃**; L1 (for the path through L2’s dendrite) at **t′₂**. Nesting: **t′₁ at t′₂ at t′₃** (L1’s h′ and dμ/dw are defined by L1’s plateau at t′₁, but **sampled at t′₂** when the gradient came through L2’s dendrite).
+
+**Plots (run_three_layer_forward.py).** The backward columns (Bwd: dendritic and Bwd: somatic) plot the **forward** trajectories σ′(t), h′(t), dμ/dw(t), E(t). So:
+
+- **Trace length:** The dμ/dw and h′ traces are only as long as **this layer’s own plateau** (non-zero and constant from t′_L to t′_L + T_p). They do **not** show a “long” plateau from t′₁ to t′₃ even when the gradient goes through all three dendrites.
+- **Effective span (dend path):** In the dend-dend-dend path, the **same** L1 value (from t′₁) is used when we sample at t′₂ and is then combined with L2/L3 terms over time — so the **effective** or causal span is t′₁→t′₂→t′₃. The plot does **not** draw dμ/dw over that long window; it draws the forward series. A **shaded band** (t′_L to t′_{L+1}) on the backward panels indicates this “effective gradient window” so the long span is visible.
+- **Vertical lines:** Gray dashed = this layer’s t′; black dotted = layer-above’s t′ (sample time for grad from above).
+
+**Why there is no “super-long plateau” in h′ and dμ/dw.** The backward quantities h′ and dμ/dw are **not** integrated over the plateau duration; they are **frozen at plateau start** and held constant for the whole plateau. Concretely: (1) **h′** is the surrogate ∂h/∂μ evaluated at **μ(t′)** (dendritic potential at the moment the plateau started), so h′(t) = σ̃(μ(t′) − μ_th) and is the same for all t during that plateau (nlayer: `mu_at_tprime = mu_hist_ell[t_prime_int, ...]` then h′ = surrogate(mu_at_tprime − μ_th)). (2) **dμ/dw** during the plateau is set to the value **at t′** (2comp_uniform: “fill plateau periods: copy from t_prime time” — `dmu_dw_plateau_values = dmu_dw_standard[t_prime_int, ...]`). So at every t in [t′₁, end of L1 plateau], L1’s h′ and dμ/dw are the **same** value (the one from t′₁). When we sample “L1 at t′₂”, we simply read that one constant — we do **not** get an extra-long plateau in the backward; we get a single point-in-time value (from t′₁) that was already constant over L1’s plateau. The nesting “t′₁ at t′₂ at t′₃” means: use the value **defined** at t′₁ (L1’s plateau start), **read** at the time t′₂ when the gradient path through L2’s dendrite needs it; that value does not “extend” over [t′₁, t′₃].
+
+---
+
 ## Path enumeration (3-layer, readout → L3 → L2 → L1)
 
 Viewed as “readout → … → target weight”:

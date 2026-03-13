@@ -70,6 +70,8 @@ def parse_args():
     p.add_argument("--loss_label_smoothing", type=float, default=None)
     p.add_argument("--beta_s", type=float, default=None, help=f"Somatic surrogate beta (default: {BETA_S})")
     p.add_argument("--beta_d", type=float, default=None, help=f"Dendritic surrogate beta (default: {BETA_D})")
+    p.add_argument("--no_kernel", action="store_true", help="Input: use_kernel=False (no alpha kernel)")
+    p.add_argument("--spike_amplitude", type=float, default=None, help="Spike amplitude when --no_kernel (default: 5.0)")
     args = p.parse_args()
 
     def _int(name, default):
@@ -106,6 +108,8 @@ def parse_args():
         "LOSS_LABEL_SMOOTHING": _float("loss_label_smoothing", LOSS_LABEL_SMOOTHING),
         "BETA_S": _float("beta_s", BETA_S),
         "BETA_D": _float("beta_d", BETA_D),
+        "NO_KERNEL": getattr(args, "no_kernel", False),
+        "SPIKE_AMPLITUDE": getattr(args, "spike_amplitude", None),
     }
 
 
@@ -143,8 +147,14 @@ def main():
 
     print("Loading SHD data...", flush=True)
     train_raw, test_raw = load_shd_data(data_path, train_samples_per_class=None, test_samples_per_class=None)
-    train_data = [(create_shd_input_jax(x, T=T), label) for x, label in train_raw]
-    test_data = [(create_shd_input_jax(x, T=T), label) for x, label in test_raw]
+    input_kw = {"T": T}
+    if cfg.get("NO_KERNEL"):
+        input_kw["use_kernel"] = False
+        if cfg.get("SPIKE_AMPLITUDE") is not None:
+            input_kw["spike_amplitude"] = cfg["SPIKE_AMPLITUDE"]
+        print("Using input with use_kernel=False", flush=True)
+    train_data = [(create_shd_input_jax(x, **input_kw), label) for x, label in train_raw]
+    test_data = [(create_shd_input_jax(x, **input_kw), label) for x, label in test_raw]
     n_inputs = train_data[0][0].shape[1]
 
     network = JAXEPropNetworkNLayer(
@@ -172,6 +182,7 @@ def main():
         "=" * 80,
         f"Architecture: n_inputs={n_inputs}, layer_sizes={layer_sizes}, n_outputs={n_outputs}, T={T}",
         f"Random seed: {seed}",
+        f"Input: use_kernel={not cfg.get('NO_KERNEL', False)}" + (f", spike_amplitude={cfg.get('SPIKE_AMPLITUDE')}" if cfg.get("SPIKE_AMPLITUDE") is not None else ""),
         f"Epochs: {epochs}, Batch size: {batch_size}",
         f"LR dend: {cfg['LR_DEND']}, soma: {cfg['LR_SOMA']}, readout: {cfg['LR_READOUT']}",
         f"weight_decay: {cfg['WEIGHT_DECAY']}, gradient_clip: {cfg['GRADIENT_CLIP']}",

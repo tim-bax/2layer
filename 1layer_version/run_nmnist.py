@@ -3,6 +3,7 @@
 Run 1-layer 2comp model on NMNIST. Loads NMNIST data, converts to (T, n_inputs), trains the standalone model.
 Same model as run_shd; only data loading is dataset-specific.
 """
+import argparse
 import os
 import sys
 from datetime import datetime
@@ -37,6 +38,11 @@ N_OUTPUTS = 10
 
 
 def main():
+    p = argparse.ArgumentParser(description="Run 1-layer 2comp model on NMNIST")
+    p.add_argument("--no_kernel", action="store_true", help="Input: use_kernel=False (no alpha kernel)")
+    p.add_argument("--spike_amplitude", type=float, default=None, help="Spike amplitude when --no_kernel (default: 5.0)")
+    args = p.parse_args()
+
     key = random.PRNGKey(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
 
@@ -63,12 +69,14 @@ def main():
         test_samples_per_class=None,
     )
     print(f"Converting to (T={T_NMNIST}, n_inputs) format...", flush=True)
-    train_data = [
-        (create_nmnist_input_jax(x, T=T_NMNIST), label) for x, label in train_raw
-    ]
-    test_data = [
-        (create_nmnist_input_jax(x, T=T_NMNIST), label) for x, label in test_raw
-    ]
+    input_kw = {"T": T_NMNIST}
+    if args.no_kernel:
+        input_kw["use_kernel"] = False
+        if args.spike_amplitude is not None:
+            input_kw["spike_amplitude"] = args.spike_amplitude
+        print("Using input with use_kernel=False", flush=True)
+    train_data = [(create_nmnist_input_jax(x, **input_kw), label) for x, label in train_raw]
+    test_data = [(create_nmnist_input_jax(x, **input_kw), label) for x, label in test_raw]
     n_inputs = train_data[0][0].shape[1]
 
     print(f"Train: {len(train_data)}, Test: {len(test_data)}, n_inputs: {n_inputs}", flush=True)

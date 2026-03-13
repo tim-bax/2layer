@@ -103,6 +103,8 @@ def parse_args():
     p.add_argument("--readout_weight_scale", type=float, default=None, help="Weight init for readout only (default: same as weight_scale; use 0.4--0.5 for non-zero initial readout)")
     p.add_argument("--pkl", type=str, default=None, help="Path to existing .pkl model to resume training (optional)")
     p.add_argument("--lowmemory", action="store_true", help="Use model_lowmemory.py (lower memory, may be slower)")
+    p.add_argument("--no_kernel", action="store_true", help="Input: use_kernel=False (no alpha kernel)")
+    p.add_argument("--spike_amplitude", type=float, default=None, help="Spike amplitude when --no_kernel (default: 5.0)")
     args = p.parse_args()
     def _int(name, default): v = getattr(args, name); return v if v is not None else default
     def _float(name, default): v = getattr(args, name); return v if v is not None else default
@@ -130,6 +132,8 @@ def parse_args():
         "WEIGHT_SCALE": _float("weight_scale", WEIGHT_SCALE),
         "READOUT_WEIGHT_SCALE": _float("readout_weight_scale", READOUT_WEIGHT_SCALE),
         "PKL_PATH": getattr(args, "pkl", None),
+        "NO_KERNEL": getattr(args, "no_kernel", False),
+        "SPIKE_AMPLITUDE": getattr(args, "spike_amplitude", None),
     }
 
 
@@ -166,12 +170,14 @@ def main():
         test_samples_per_class=None,
     )
     print(f"Converting to (T={T}, n_inputs) format...", flush=True)
-    train_data = [
-        (create_shd_input_jax(x, T=T), label) for x, label in train_raw
-    ]
-    test_data = [
-        (create_shd_input_jax(x, T=T), label) for x, label in test_raw
-    ]
+    input_kw = {"T": T}
+    if cfg.get("NO_KERNEL"):
+        input_kw["use_kernel"] = False
+        if cfg.get("SPIKE_AMPLITUDE") is not None:
+            input_kw["spike_amplitude"] = cfg["SPIKE_AMPLITUDE"]
+        print("Using input with use_kernel=False", flush=True)
+    train_data = [(create_shd_input_jax(x, **input_kw), label) for x, label in train_raw]
+    test_data = [(create_shd_input_jax(x, **input_kw), label) for x, label in test_raw]
     n_inputs = train_data[0][0].shape[1]
 
     print(f"Train: {len(train_data)}, Test: {len(test_data)}, n_inputs: {n_inputs}", flush=True)
@@ -242,6 +248,7 @@ def main():
         "", "1-layer SHD run", "=" * 80,
         f"Random seed: {seed}",
         f"Epochs: {epochs}, Batch size: {batch_size}",
+        f"Input: use_kernel={not cfg.get('NO_KERNEL', False)}" + (f", spike_amplitude={cfg.get('SPIKE_AMPLITUDE')}" if cfg.get("SPIKE_AMPLITUDE") is not None else ""),
         f"Warmup readout epochs: {cfg['WARMUP_READOUT_EPOCHS']}",
         f"grad_dend_scale: {cfg['GRAD_DEND_SCALE']}, spike_dropout: {cfg['SPIKE_DROPOUT']}",
         f"LR hidden dend: {cfg['LR_HIDDEN_DEND']}, soma: {cfg['LR_HIDDEN_SOMA']}, readout: {cfg['LR_READOUT']}",
