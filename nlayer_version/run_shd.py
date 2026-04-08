@@ -46,7 +46,9 @@ LOSS_COUNT_BIAS = 0.1
 LOSS_LABEL_SMOOTHING = 0.2
 BETA_S = 0.36   # Somatic surrogate (super-spike); larger = gradient more concentrated near threshold
 BETA_D = 0.75   # Dendritic surrogate
-SPIKE_DROPOUT = 0.1   # Train-time spike dropout (0 = off); zero out fraction of non-zero input bins
+SPIKE_DROPOUT = 0.0   # Train-time spike dropout (0 = off); zero out fraction of non-zero input bins
+SPIKE_AMPLITUDE = 1.0
+NO_KERNEL = True
 # -----------------------------------------------------------------------------
 
 
@@ -82,9 +84,16 @@ def parse_args():
     p.add_argument("--loss_label_smoothing", type=float, default=None)
     p.add_argument("--beta_s", type=float, default=None, help=f"Somatic surrogate beta (default: {BETA_S})")
     p.add_argument("--beta_d", type=float, default=None, help=f"Dendritic surrogate beta (default: {BETA_D})")
-    p.add_argument("--no_kernel", action="store_true", help="Input: use_kernel=False (no alpha kernel)")
-    p.add_argument("--spike_amplitude", type=float, default=None, help="Spike amplitude when --no_kernel (default: 5.0)")
-    p.add_argument("--spike_dropout", type=float, default=None, help="Train-time spike dropout 0--1 (default: 0.1)")
+    p.add_argument("--no_kernel", dest="no_kernel", action="store_true", help="Input: use_kernel=False (default)")
+    p.add_argument("--kernel", dest="no_kernel", action="store_false", help="Input: use_kernel=True (alpha kernel)")
+    p.set_defaults(no_kernel=NO_KERNEL)
+    p.add_argument(
+        "--spike_amplitude",
+        type=float,
+        default=None,
+        help=f"Spike amplitude override for both kernel/no-kernel modes (default: {SPIKE_AMPLITUDE})",
+    )
+    p.add_argument("--spike_dropout", type=float, default=None, help="Train-time spike dropout 0--1 (default: 0.0)")
     args = p.parse_args()
 
     def _int(name, default):
@@ -121,7 +130,7 @@ def parse_args():
         "LOSS_LABEL_SMOOTHING": _float("loss_label_smoothing", LOSS_LABEL_SMOOTHING),
         "BETA_S": _float("beta_s", BETA_S),
         "BETA_D": _float("beta_d", BETA_D),
-        "NO_KERNEL": getattr(args, "no_kernel", False),
+        "NO_KERNEL": getattr(args, "no_kernel", NO_KERNEL),
         "SPIKE_AMPLITUDE": getattr(args, "spike_amplitude", None),
         "SPIKE_DROPOUT": _float("spike_dropout", SPIKE_DROPOUT),
     }
@@ -164,9 +173,11 @@ def main():
     input_kw = {"T": T}
     if cfg.get("NO_KERNEL"):
         input_kw["use_kernel"] = False
-        if cfg.get("SPIKE_AMPLITUDE") is not None:
-            input_kw["spike_amplitude"] = cfg["SPIKE_AMPLITUDE"]
         print("Using input with use_kernel=False", flush=True)
+    # Apply shared default/override for both kernel and no-kernel input creation.
+    input_kw["spike_amplitude"] = (
+        cfg["SPIKE_AMPLITUDE"] if cfg.get("SPIKE_AMPLITUDE") is not None else SPIKE_AMPLITUDE
+    )
     train_data = [(create_shd_input_jax(x, **input_kw), label) for x, label in train_raw]
     test_data = [(create_shd_input_jax(x, **input_kw), label) for x, label in test_raw]
     n_inputs = train_data[0][0].shape[1]

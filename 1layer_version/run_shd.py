@@ -64,7 +64,9 @@ GRAD_DEND_SCALE = 1.0
 WEIGHT_DECAY = 0.00001
 GRADIENT_CLIP = 5.0
 # Spike dropout: fraction of non-zero input bins to zero out at train time (0 = off)
-SPIKE_DROPOUT = 0.1
+SPIKE_DROPOUT = 0.0
+SPIKE_AMPLITUDE = 1.0
+NO_KERNEL = True
 # Loss (softmax temperature, count bias, label smoothing)
 LOSS_TEMPERATURE = 2.7
 LOSS_COUNT_BIAS = 0.18
@@ -93,7 +95,7 @@ def parse_args():
     p.add_argument("--grad_dend_scale", type=float, default=None, help="Scale factor for dendritic gradient (default 1.0)")
     p.add_argument("--weight_decay", type=float, default=None)
     p.add_argument("--gradient_clip", type=float, default=None)
-    p.add_argument("--spike_dropout", type=float, default=None, help="Train-time spike dropout rate 0--1 (default 0.1)")
+    p.add_argument("--spike_dropout", type=float, default=None, help="Train-time spike dropout rate 0--1 (default 0.0)")
     p.add_argument("--loss_temperature", type=float, default=None)
     p.add_argument("--loss_count_bias", type=float, default=None)
     p.add_argument("--loss_label_smoothing", type=float, default=None)
@@ -103,8 +105,10 @@ def parse_args():
     p.add_argument("--readout_weight_scale", type=float, default=None, help="Weight init for readout only (default: same as weight_scale; use 0.4--0.5 for non-zero initial readout)")
     p.add_argument("--pkl", type=str, default=None, help="Path to existing .pkl model to resume training (optional)")
     p.add_argument("--lowmemory", action="store_true", help="Use model_lowmemory.py (lower memory, may be slower)")
-    p.add_argument("--no_kernel", action="store_true", help="Input: use_kernel=False (no alpha kernel)")
-    p.add_argument("--spike_amplitude", type=float, default=None, help="Spike amplitude when --no_kernel (default: 5.0)")
+    p.add_argument("--no_kernel", dest="no_kernel", action="store_true", help="Input: use_kernel=False (default)")
+    p.add_argument("--kernel", dest="no_kernel", action="store_false", help="Input: use_kernel=True (alpha kernel)")
+    p.set_defaults(no_kernel=NO_KERNEL)
+    p.add_argument("--spike_amplitude", type=float, default=None, help=f"Spike amplitude override for kernel/no-kernel (default: {SPIKE_AMPLITUDE})")
     args = p.parse_args()
     def _int(name, default): v = getattr(args, name); return v if v is not None else default
     def _float(name, default): v = getattr(args, name); return v if v is not None else default
@@ -132,8 +136,8 @@ def parse_args():
         "WEIGHT_SCALE": _float("weight_scale", WEIGHT_SCALE),
         "READOUT_WEIGHT_SCALE": _float("readout_weight_scale", READOUT_WEIGHT_SCALE),
         "PKL_PATH": getattr(args, "pkl", None),
-        "NO_KERNEL": getattr(args, "no_kernel", False),
-        "SPIKE_AMPLITUDE": getattr(args, "spike_amplitude", None),
+        "NO_KERNEL": getattr(args, "no_kernel", NO_KERNEL),
+        "SPIKE_AMPLITUDE": _float("spike_amplitude", SPIKE_AMPLITUDE),
     }
 
 
@@ -173,9 +177,8 @@ def main():
     input_kw = {"T": T}
     if cfg.get("NO_KERNEL"):
         input_kw["use_kernel"] = False
-        if cfg.get("SPIKE_AMPLITUDE") is not None:
-            input_kw["spike_amplitude"] = cfg["SPIKE_AMPLITUDE"]
         print("Using input with use_kernel=False", flush=True)
+    input_kw["spike_amplitude"] = cfg["SPIKE_AMPLITUDE"]
     train_data = [(create_shd_input_jax(x, **input_kw), label) for x, label in train_raw]
     test_data = [(create_shd_input_jax(x, **input_kw), label) for x, label in test_raw]
     n_inputs = train_data[0][0].shape[1]
