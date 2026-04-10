@@ -145,14 +145,14 @@ def _loss_and_grads(
     global_error = target_smoothed - probs
 
     grad_readout = (global_error[:, None] * A_readout) / T
-    grad_soma = jnp.einsum("j,jik->ik", global_error, A_soma) / T
+    grad_soma = jnp.einsum("j,jik->ik", global_error, A_soma) / (T * 8.0)
     grad_dend = jnp.einsum("j,jik->ik", global_error, A_dend) / T
 
     return loss, prediction, grad_readout, grad_soma, grad_dend
 
 
 def _apply_grads(w_dend, w_soma, w_readout, g_dend, g_soma, g_readout, lr, clip_value):
-    """Clip gradients and update weights."""
+    """SGD: clip gradients and update weights."""
     g_readout = jnp.clip(g_readout, -clip_value, clip_value)
     g_soma = jnp.clip(g_soma, -clip_value, clip_value)
     g_dend = jnp.clip(g_dend, -clip_value, clip_value)
@@ -161,6 +161,29 @@ def _apply_grads(w_dend, w_soma, w_readout, g_dend, g_soma, g_readout, lr, clip_
         w_soma + lr * g_soma,
         w_readout + lr * g_readout,
     )
+
+
+def _adam_apply(
+    w_d, w_s, w_r,
+    g_d, g_s, g_r,
+    m_d, m_s, m_r,
+    v_d, v_s, v_r,
+    step, lr, beta1, beta2, eps, clip_value,
+):
+    """Adam: clip gradients, update moments, update weights."""
+    def update_one(w, g, m, v):
+        g = jnp.clip(g, -clip_value, clip_value)
+        m = beta1 * m + (1 - beta1) * g
+        v = beta2 * v + (1 - beta2) * g ** 2
+        m_hat = m / (1 - beta1 ** step)
+        v_hat = v / (1 - beta2 ** step)
+        w = w + lr * m_hat / (jnp.sqrt(v_hat) + eps)
+        return w, m, v
+
+    w_d, m_d, v_d = update_one(w_d, g_d, m_d, v_d)
+    w_s, m_s, v_s = update_one(w_s, g_s, m_s, v_s)
+    w_r, m_r, v_r = update_one(w_r, g_r, m_r, v_r)
+    return (w_d, w_s, w_r, m_d, m_s, m_r, v_d, v_s, v_r)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -203,6 +226,7 @@ _fwd_single = jit(_forward_and_accum)
 _pred_single = jit(_predict_only)
 _loss_single = jit(_loss_and_grads)
 _apply = jit(_apply_grads)
+_adam = jit(_adam_apply)
 
 _fwd_batch = jit(vmap(_forward_and_accum, in_axes=_FWD_AXES))
 _pred_batch = jit(vmap(_predict_only, in_axes=_PRED_AXES))
@@ -221,15 +245,32 @@ class Network:
         n_hidden: int,
         n_outputs: int,
         config: NeuronConfig,
+        optimizer: str = "sgd",
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        adam_eps: float = 1e-8,
     ):
         self.n_inputs = n_inputs
         self.n_hidden = n_hidden
         self.n_outputs = n_outputs
         self.config = config
+        self.optimizer = optimizer
 
         key_h, key_r = random.split(key)
         self.hidden = TwoCompNeuron(key_h, n_hidden, n_inputs, config)
         self.readout = LIFNeuron(key_r, n_outputs, n_hidden, config)
+
+        if optimizer == "adam":
+            self.beta1 = beta1
+            self.beta2 = beta2
+            self.adam_eps = adam_eps
+            self.adam_step = jnp.array(0, dtype=jnp.int32)
+            self.m_dend = jnp.zeros_like(self.hidden.w_dend)
+            self.m_soma = jnp.zeros_like(self.hidden.w_soma)
+            self.m_readout = jnp.zeros_like(self.readout.w)
+            self.v_dend = jnp.zeros_like(self.hidden.w_dend)
+            self.v_soma = jnp.zeros_like(self.hidden.w_soma)
+            self.v_readout = jnp.zeros_like(self.readout.w)
 
     # ── Helpers to build zero-initialized carries ──
 
@@ -271,10 +312,31 @@ class Network:
         one_hot = jnp.eye(self.n_outputs)[targets]
         return one_hot * (1 - cfg.loss_label_smoothing) + cfg.loss_label_smoothing / self.n_outputs
 
+    def _update_weights(self, g_d, g_s, g_r, lr, clip_value):
+        """Apply gradients using the configured optimizer (SGD or Adam)."""
+        if self.optimizer == "adam":
+            self.adam_step = self.adam_step + 1
+            result = _adam(
+                self.hidden.w_dend, self.hidden.w_soma, self.readout.w,
+                g_d, g_s, g_r,
+                self.m_dend, self.m_soma, self.m_readout,
+                self.v_dend, self.v_soma, self.v_readout,
+                self.adam_step, lr, self.beta1, self.beta2, self.adam_eps, clip_value,
+            )
+            (self.hidden.w_dend, self.hidden.w_soma, self.readout.w,
+             self.m_dend, self.m_soma, self.m_readout,
+             self.v_dend, self.v_soma, self.v_readout) = result
+        else:
+            self.hidden.w_dend, self.hidden.w_soma, self.readout.w = _apply(
+                *self._weights(), g_d, g_s, g_r, lr, clip_value,
+            )
+
     # ── Single-sample API ──
 
     def train_step(self, x_input, target, lr=1e-3, clip_value=1.0):
-        """Train on one sample. x_input: (T,K), target: int."""
+        """Train on one sample. x_input: (T,K), target: int.
+        Returns: (loss, prediction, grad_norms_dict)
+        """
         T = x_input.shape[0]
 
         counts, A_r, A_s, A_d = _fwd_single(
@@ -288,10 +350,14 @@ class Network:
             self.config.loss_temperature, self.config.loss_count_bias,
         )
 
-        self.hidden.w_dend, self.hidden.w_soma, self.readout.w = _apply(
-            *self._weights(), g_d, g_s, g_r, lr, clip_value,
-        )
-        return float(loss), int(pred)
+        gnorms = {
+            "readout": float(jnp.linalg.norm(g_r)),
+            "soma": float(jnp.linalg.norm(g_s)),
+            "dend": float(jnp.linalg.norm(g_d)),
+        }
+
+        self._update_weights(g_d, g_s, g_r, lr, clip_value)
+        return float(loss), int(pred), gnorms
 
     def predict(self, x_input):
         """Predict one sample. x_input: (T,K) → int class label."""
@@ -311,37 +377,34 @@ class Network:
         x_batch: (B, T, K)  — B input spike trains stacked
         targets: (B,)       — integer labels
 
-        Returns: (mean_loss, predictions_array (B,))
+        Returns: (mean_loss, predictions_array (B,), grad_norms_dict)
         """
         B = x_batch.shape[0]
         T = x_batch.shape[1]
 
-        # Step 1: forward pass — B copies of the lax.scan run in lockstep
-        #   Every (N,) vector becomes (B,N), every (J,N,K) tensor becomes (B,J,N,K)
         counts, A_r, A_s, A_d = _fwd_batch(
             x_batch, *self._weights(), *self._params(),
             self._h_carry(B), self._r_carry(B), self._A_d_zeros(B),
         )
 
-        # Step 2: per-sample loss + gradients (also vmapped)
-        #   Each sample gets its own global_error and gradient matrices
         losses, preds, g_r, g_s, g_d = _loss_batch(
             counts, A_r, A_s, A_d,
             self._smooth_targets(targets), T,
             self.config.loss_temperature, self.config.loss_count_bias,
         )
 
-        # Step 3: average gradients across the batch → one update
-        #   g_r is (B, J, N) → mean → (J, N), same for g_s and g_d
         g_r_avg = jnp.mean(g_r, axis=0)
         g_s_avg = jnp.mean(g_s, axis=0)
         g_d_avg = jnp.mean(g_d, axis=0)
 
-        # Step 4: apply averaged gradients to weights (single update)
-        self.hidden.w_dend, self.hidden.w_soma, self.readout.w = _apply(
-            *self._weights(), g_d_avg, g_s_avg, g_r_avg, lr, clip_value,
-        )
-        return float(jnp.mean(losses)), preds
+        gnorms = {
+            "readout": float(jnp.linalg.norm(g_r_avg)),
+            "soma": float(jnp.linalg.norm(g_s_avg)),
+            "dend": float(jnp.linalg.norm(g_d_avg)),
+        }
+
+        self._update_weights(g_d_avg, g_s_avg, g_r_avg, lr, clip_value)
+        return float(jnp.mean(losses)), preds, gnorms
 
     def batch_predict(self, x_batch):
         """Predict B samples in parallel. x_batch: (B,T,K) → (B,) int labels."""
