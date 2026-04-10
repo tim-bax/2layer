@@ -18,6 +18,7 @@ def _forward_and_accum(
     x_input, w_dend, w_soma, w_readout,
     alpha_s, alpha_d, alpha_m, T_p, config,
     h_carry_init, r_carry_init, A_d_init,
+    rng_key, dropout_rate,
 ):
     """Forward pass + gradient accumulator bookkeeping for one sample.
 
@@ -25,22 +26,33 @@ def _forward_and_accum(
     h_carry_init: 8-tuple of hidden-neuron state zeros
     r_carry_init: 3-tuple of readout-neuron state zeros
     A_d_init:     (J, N, K) dendritic accumulator zeros
+    rng_key:      PRNG key for dropout masks
+    dropout_rate: fraction of hidden spikes to drop (0.0 = no dropout)
 
     Returns: readout_counts (J,), A_readout (J,N), A_soma (J,N,K), A_dend (J,N,K)
     """
     dend_inputs = x_input @ w_dend.T
     soma_inputs = x_input @ w_soma.T
     T = x_input.shape[0]
+    n_hidden = w_dend.shape[0]
     time_indices = jnp.arange(T, dtype=jnp.int32)
+    dropout_keys = random.split(rng_key, T)
+    dropout_scale = 1.0 / (1.0 - dropout_rate)
 
     def step(carry, inputs):
         h_carry, r_carry, A_d = carry
-        dend_in, soma_in, x_t, t = inputs
+        dend_in, soma_in, x_t, t, drop_key = inputs
 
         h_carry, h_o, h_v_pre, h_h, h_h_prev, h_mu_at_tp = TwoCompNeuron.forward_step(
             h_carry, dend_in, soma_in, t, alpha_s, alpha_d, T_p, config,
         )
         hidden_o_float = h_o.astype(jnp.float64)
+
+        # Dropout: randomly zero out hidden spikes before the readout sees them.
+        # Surviving spikes are scaled by 1/(1-p) so expected value is unchanged.
+        # At dropout_rate=0.0 the mask is all-ones and scale is 1.0 (no-op).
+        mask = random.bernoulli(drop_key, 1.0 - dropout_rate, (n_hidden,)).astype(jnp.float64)
+        hidden_o_float = hidden_o_float * mask * dropout_scale
 
         r_carry, r_o, r_v_pre, r_E = LIFNeuron.forward_step(
             r_carry, hidden_o_float, w_readout, alpha_m, config.v_th,
@@ -70,7 +82,7 @@ def _forward_and_accum(
         return new_carry, per_step
 
     init_carry = (h_carry_init, r_carry_init, A_d_init)
-    scan_inputs = (dend_inputs, soma_inputs, x_input, time_indices)
+    scan_inputs = (dend_inputs, soma_inputs, x_input, time_indices, dropout_keys)
     final_carry, per_step_all = lax.scan(step, init_carry, scan_inputs)
 
     sp_r, sp_h, E_r, E_s = per_step_all
@@ -201,6 +213,8 @@ _FWD_AXES = (
     (0, 0, 0, 0, 0, 0, 0, 0),    # h_carry_init (8-tuple, each batched)
     (0, 0, 0),                    # r_carry_init (3-tuple, each batched)
     0,                            # A_d_init
+    0,                            # rng_key (per-sample)
+    None,                         # dropout_rate (shared)
 )
 
 _PRED_AXES = (
@@ -249,16 +263,19 @@ class Network:
         beta1: float = 0.9,
         beta2: float = 0.999,
         adam_eps: float = 1e-8,
+        dropout_rate: float = 0.0,
     ):
         self.n_inputs = n_inputs
         self.n_hidden = n_hidden
         self.n_outputs = n_outputs
         self.config = config
         self.optimizer = optimizer
+        self.dropout_rate = dropout_rate
 
-        key_h, key_r = random.split(key)
+        key_h, key_r, key_rng = random.split(key, 3)
         self.hidden = TwoCompNeuron(key_h, n_hidden, n_inputs, config)
         self.readout = LIFNeuron(key_r, n_outputs, n_hidden, config)
+        self.rng_key = key_rng
 
         if optimizer == "adam":
             self.beta1 = beta1
@@ -333,8 +350,15 @@ class Network:
 
     # ── Single-sample API ──
 
+    def _next_key(self):
+        """Advance the PRNG and return a fresh subkey for dropout."""
+        self.rng_key, subkey = random.split(self.rng_key)
+        return subkey
+
+    # ── Single-sample API ──
+
     def train_step(self, x_input, target, lr=1e-3, clip_value=1.0):
-        """Train on one sample. x_input: (T,K), target: int.
+        """Train on one sample (with dropout during forward pass).
         Returns: (loss, prediction, grad_norms_dict)
         """
         T = x_input.shape[0]
@@ -342,6 +366,7 @@ class Network:
         counts, A_r, A_s, A_d = _fwd_single(
             x_input, *self._weights(), *self._params(),
             self._h_carry(), self._r_carry(), self._A_d_zeros(),
+            self._next_key(), self.dropout_rate,
         )
 
         loss, pred, g_r, g_s, g_d = _loss_single(
@@ -360,31 +385,25 @@ class Network:
         return float(loss), int(pred), gnorms
 
     def predict(self, x_input):
-        """Predict one sample. x_input: (T,K) → int class label."""
+        """Predict one sample (no dropout). x_input: (T,K) → int class label."""
         counts = _pred_single(x_input, *self._weights(), *self._params())
         return int(jnp.argmax(counts))
 
     # ── Batched API ──
-    #
-    # vmap runs the SAME single-sample logic on B samples in parallel.
-    # At each of the T=700 time steps, all B samples are processed
-    # simultaneously — the GPU fills its cores with B parallel computations
-    # instead of idling on one.
 
     def batch_train_step(self, x_batch, targets, lr=1e-3, clip_value=1.0):
-        """Train on B samples in parallel.
-
-        x_batch: (B, T, K)  — B input spike trains stacked
-        targets: (B,)       — integer labels
-
+        """Train on B samples in parallel (with dropout).
         Returns: (mean_loss, predictions_array (B,), grad_norms_dict)
         """
         B = x_batch.shape[0]
         T = x_batch.shape[1]
 
+        batch_keys = random.split(self._next_key(), B)
+
         counts, A_r, A_s, A_d = _fwd_batch(
             x_batch, *self._weights(), *self._params(),
             self._h_carry(B), self._r_carry(B), self._A_d_zeros(B),
+            batch_keys, self.dropout_rate,
         )
 
         losses, preds, g_r, g_s, g_d = _loss_batch(
