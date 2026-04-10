@@ -146,14 +146,14 @@ def main():
 
             if B == 1:
                 x, y = train_data[int(batch_idx[0])]
-                loss, pred = net.train_step(
+                loss, pred, gnorms = net.train_step(
                     jnp.array(x), int(y), lr=args.lr, clip_value=args.gradient_clip,
                 )
                 batch_correct = int(pred == int(y))
             else:
                 x_batch = jnp.stack([train_data[int(i)][0] for i in batch_idx])
                 y_batch = jnp.array([int(train_data[int(i)][1]) for i in batch_idx])
-                loss, preds = net.batch_train_step(
+                loss, preds, gnorms = net.batch_train_step(
                     x_batch, y_batch, lr=args.lr, clip_value=args.gradient_clip,
                 )
                 batch_correct = int(jnp.sum(preds == y_batch))
