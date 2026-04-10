@@ -30,6 +30,7 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--gradient_clip", type=float, default=5.0)
     p.add_argument("--loss_temperature", type=float, default=2.7)
     p.add_argument("--loss_count_bias", type=float, default=0.18)
@@ -42,18 +43,35 @@ def parse_args():
     return p.parse_args()
 
 
-def evaluate(net: Network, dataset):
+def evaluate(net, dataset, batch_size=1):
+    n = len(dataset)
+    if batch_size <= 1:
+        correct = sum(1 for x, y in dataset if net.predict(x) == int(y))
+        return 100.0 * correct / max(n, 1)
+
     correct = 0
-    for x, y in dataset:
-        if net.predict(x) == int(y):
-            correct += 1
-    return 100.0 * correct / max(len(dataset), 1)
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        batch = dataset[start:end]
+        actual = len(batch)
+
+        xs = [x for x, y in batch]
+        ys = jnp.array([int(y) for x, y in batch])
+
+        if actual < batch_size:
+            xs += [xs[0]] * (batch_size - actual)
+
+        preds = net.batch_predict(jnp.stack(xs))
+        correct += int(jnp.sum(preds[:actual] == ys))
+
+    return 100.0 * correct / max(n, 1)
 
 
 def main():
     args = parse_args()
     np.random.seed(args.seed)
     key = random.PRNGKey(args.seed)
+    B = args.batch_size
 
     print("Loading SHD data...", flush=True)
     train_raw, test_raw = load_shd_data()
@@ -67,7 +85,7 @@ def main():
     n_inputs = train_data[0][0].shape[1]
     print(
         f"Train: {len(train_data)}  Test: {len(test_data)}  "
-        f"n_inputs: {n_inputs}  T: {args.T}",
+        f"n_inputs: {n_inputs}  T: {args.T}  batch_size: {B}",
         flush=True,
     )
 
@@ -85,7 +103,7 @@ def main():
         flush=True,
     )
 
-    pre_acc = evaluate(net, test_data)
+    pre_acc = evaluate(net, test_data, B)
     print(f"Pre-training test accuracy: {pre_acc:.2f}%", flush=True)
 
     dev = jax.local_devices()[0]
@@ -101,7 +119,11 @@ def main():
         print(f"Device: {dev} (no memory stats available)", flush=True)
 
     n_train = len(train_data)
+    n_batches = n_train // B
+    samples_per_epoch = n_batches * B
     log_interval = 1000
+    log_every = max(1, log_interval // B)
+
     for epoch in range(1, args.epochs + 1):
         idx = np.random.permutation(n_train)
         losses = []
@@ -109,40 +131,53 @@ def main():
         epoch_t0 = time.time()
         batch_t0 = time.time()
 
-        for step, i in enumerate(idx, 1):
-            x, y = train_data[int(i)]
-            loss, pred = net.train_step(
-                jnp.array(x), int(y), lr=args.lr, clip_value=args.gradient_clip
-            )
-            losses.append(loss)
-            if pred == int(y):
-                correct += 1
+        for bi in range(n_batches):
+            start = bi * B
+            batch_idx = idx[start : start + B]
 
-            if step == 1 and hasattr(dev, "memory_stats") and dev.memory_stats() is not None:
+            if B == 1:
+                x, y = train_data[int(batch_idx[0])]
+                loss, pred = net.train_step(
+                    jnp.array(x), int(y), lr=args.lr, clip_value=args.gradient_clip,
+                )
+                batch_correct = int(pred == int(y))
+            else:
+                x_batch = jnp.stack([train_data[int(i)][0] for i in batch_idx])
+                y_batch = jnp.array([int(train_data[int(i)][1]) for i in batch_idx])
+                loss, preds = net.batch_train_step(
+                    x_batch, y_batch, lr=args.lr, clip_value=args.gradient_clip,
+                )
+                batch_correct = int(jnp.sum(preds == y_batch))
+
+            losses.append(loss)
+            correct += batch_correct
+
+            if bi == 0 and hasattr(dev, "memory_stats") and dev.memory_stats() is not None:
                 ms = dev.memory_stats()
                 print(
-                    f"GPU after 1st train step: {ms['bytes_in_use']/1e6:.1f} MB in use, "
+                    f"GPU after 1st train batch: {ms['bytes_in_use']/1e6:.1f} MB in use, "
                     f"{ms['peak_bytes_in_use']/1e6:.1f} MB peak",
                     flush=True,
                 )
 
-            if step % log_interval == 0:
+            if (bi + 1) % log_every == 0:
                 elapsed = time.time() - batch_t0
-                sps = log_interval / max(elapsed, 1e-6)
-                avg_loss = float(np.mean(losses[-log_interval:]))
-                acc_so_far = 100.0 * correct / step
-                remaining = (n_train - step) / max(sps, 1e-6)
+                samples_done = (bi + 1) * B
+                sps = (log_every * B) / max(elapsed, 1e-6)
+                avg_loss = float(np.mean(losses[-log_every:]))
+                acc_so_far = 100.0 * correct / samples_done
+                remaining = (samples_per_epoch - samples_done) / max(sps, 1e-6)
                 print(
-                    f"  [{step:5d}/{n_train}] loss={avg_loss:.4f} "
-                    f"acc={acc_so_far:.1f}% | {sps:.2f} samples/s, "
+                    f"  [{samples_done:5d}/{samples_per_epoch}] loss={avg_loss:.4f} "
+                    f"acc={acc_so_far:.1f}% | {sps:.1f} samples/s, "
                     f"~{remaining:.0f}s remaining",
                     flush=True,
                 )
                 batch_t0 = time.time()
 
         epoch_elapsed = time.time() - epoch_t0
-        train_acc = 100.0 * correct / max(n_train, 1)
-        test_acc = evaluate(net, test_data)
+        train_acc = 100.0 * correct / max(samples_per_epoch, 1)
+        test_acc = evaluate(net, test_data, B)
         avg_loss = float(np.mean(losses)) if losses else 0.0
         print(
             f"Epoch {epoch:03d} | loss={avg_loss:.4f} "
@@ -151,7 +186,7 @@ def main():
             flush=True,
         )
 
-    final_acc = evaluate(net, test_data)
+    final_acc = evaluate(net, test_data, B)
     print(f"\nFinal test accuracy: {final_acc:.2f}%", flush=True)
 
 
