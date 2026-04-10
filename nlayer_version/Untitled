@@ -1,0 +1,25 @@
+# Version 3 (carry-only forward pass; no full histories)
+# Carry at step t: mu_prev, v_prev, h_prev, t_prime_prev, mu_at_tprime_prev
+t_prime = jnp.where(t == 0, 0, jnp.where(h_prev == 1, t_prime_prev, t))
+mu = jnp.where(t > 0, alpha * mu_prev + (1 - h_prev) * dend_in[t], dend_in[t])
+mu_at_tprime = jnp.where((t == 0) | (h_prev == 0), mu, mu_at_tprime_prev)
+
+plateau_duration = t - t_prime
+h = jnp.where(
+    (mu_at_tprime >= config.mu_th) &
+    (plateau_duration <= T_p) &
+    (plateau_duration >= 0),
+    1,
+    0,
+)
+
+v_pre_reset = jnp.where(t > 0, alpha_s * v_prev + soma_in[t], soma_in[t])
+o = jnp.where(v_pre_reset >= config.v_th - config.gamma * h, 1, 0)
+v = v_pre_reset * (1 - o)
+
+# Next carry state
+mu_next = mu
+v_next = v
+h_next = h
+t_prime_next = t_prime
+mu_at_tprime_next = mu_at_tprime
