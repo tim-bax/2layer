@@ -88,6 +88,18 @@ def main():
     pre_acc = evaluate(net, test_data)
     print(f"Pre-training test accuracy: {pre_acc:.2f}%", flush=True)
 
+    dev = jax.local_devices()[0]
+    if hasattr(dev, "memory_stats") and dev.memory_stats() is not None:
+        ms = dev.memory_stats()
+        print(
+            f"GPU memory: {ms['bytes_in_use']/1e6:.1f} MB in use, "
+            f"{ms['peak_bytes_in_use']/1e6:.1f} MB peak, "
+            f"{ms['bytes_limit']/1e6:.1f} MB pool",
+            flush=True,
+        )
+    else:
+        print(f"Device: {dev} (no memory stats available)", flush=True)
+
     n_train = len(train_data)
     log_interval = 1000
     for epoch in range(1, args.epochs + 1):
@@ -105,6 +117,14 @@ def main():
             losses.append(loss)
             if pred == int(y):
                 correct += 1
+
+            if step == 1 and hasattr(dev, "memory_stats") and dev.memory_stats() is not None:
+                ms = dev.memory_stats()
+                print(
+                    f"GPU after 1st train step: {ms['bytes_in_use']/1e6:.1f} MB in use, "
+                    f"{ms['peak_bytes_in_use']/1e6:.1f} MB peak",
+                    flush=True,
+                )
 
             if step % log_interval == 0:
                 elapsed = time.time() - batch_t0
