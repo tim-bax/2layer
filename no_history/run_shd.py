@@ -5,7 +5,22 @@ import sys
 import time
 
 import jax
-jax.config.update("jax_enable_x64", True)
+
+
+def _precision_from_argv(argv):
+    default = "64"
+    for i, arg in enumerate(argv):
+        if arg.startswith("--precision="):
+            return arg.split("=", 1)[1]
+        if arg == "--precision" and i + 1 < len(argv):
+            return argv[i + 1]
+    return default
+
+
+_PRECISION = _precision_from_argv(sys.argv[1:])
+if _PRECISION not in ("32", "64"):
+    raise ValueError(f"Invalid --precision '{_PRECISION}'. Expected '32' or '64'.")
+jax.config.update("jax_enable_x64", _PRECISION == "64")
 import jax.numpy as jnp
 from jax import random
 import numpy as np
@@ -48,6 +63,12 @@ def parse_args():
     p.add_argument("--beta1", type=float, default=0.9)
     p.add_argument("--beta2", type=float, default=0.999)
     p.add_argument("--adam_eps", type=float, default=1e-8)
+    p.add_argument(
+        "--precision",
+        choices=["32", "64"],
+        default=_PRECISION,
+        help="Floating-point precision for JAX computations.",
+    )
     return p.parse_args()
 
 
@@ -77,6 +98,11 @@ def evaluate(net, dataset, batch_size=1):
 
 def main():
     args = parse_args()
+    if args.precision != _PRECISION:
+        raise ValueError(
+            f"--precision mismatch during startup ({args.precision} vs {_PRECISION}). "
+            "Pass --precision only once."
+        )
     np.random.seed(args.seed)
     key = random.PRNGKey(args.seed)
     B = args.batch_size
@@ -93,7 +119,8 @@ def main():
     n_inputs = train_data[0][0].shape[1]
     print(
         f"Train: {len(train_data)}  Test: {len(test_data)}  "
-        f"n_inputs: {n_inputs}  T: {args.T}  batch_size: {B}",
+        f"n_inputs: {n_inputs}  T: {args.T}  batch_size: {B}  "
+        f"precision=float{args.precision}",
         flush=True,
     )
 
