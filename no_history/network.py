@@ -163,15 +163,26 @@ def _loss_and_grads(
     return loss, prediction, grad_readout, grad_soma, grad_dend
 
 
-def _apply_grads(w_dend, w_soma, w_readout, g_dend, g_soma, g_readout, lr, clip_value):
-    """SGD: clip gradients and update weights."""
+def _apply_grads(
+    w_dend, w_soma, w_readout, g_dend, g_soma, g_readout,
+    lr, clip_value, weight_decay,
+):
+    """SGD with decoupled weight decay.
+
+    Gradients are clipped first, then weights are updated as
+        w ← w + lr·g − lr·λ·w,
+    which for plain SGD is mathematically equivalent to adding
+    (λ/2)·||w||² to the loss (the L2 penalty), but keeps the
+    weight-decay term outside the clip so it can't be capped by
+    the gradient clip.
+    """
     g_readout = jnp.clip(g_readout, -clip_value, clip_value)
     g_soma = jnp.clip(g_soma, -clip_value, clip_value)
     g_dend = jnp.clip(g_dend, -clip_value, clip_value)
     return (
-        w_dend + lr * g_dend,
-        w_soma + lr * g_soma,
-        w_readout + lr * g_readout,
+        w_dend + lr * g_dend - lr * weight_decay * w_dend,
+        w_soma + lr * g_soma - lr * weight_decay * w_soma,
+        w_readout + lr * g_readout - lr * weight_decay * w_readout,
     )
 
 
@@ -180,16 +191,24 @@ def _adam_apply(
     g_d, g_s, g_r,
     m_d, m_s, m_r,
     v_d, v_s, v_r,
-    step, lr, beta1, beta2, eps, clip_value,
+    step, lr, beta1, beta2, eps, clip_value, weight_decay,
 ):
-    """Adam: clip gradients, update moments, update weights."""
+    """AdamW-style decoupled weight decay.
+
+    The data gradient flows through the moment estimates and the
+    adaptive 1/√v rescaling, but the λ·w term does not — it is
+    subtracted directly from w after the Adam update. This matches
+    Loshchilov & Hutter (2017) and avoids the parameter-dependent
+    decay strength that arises if λ·w is added to the loss before
+    Adam normalisation.
+    """
     def update_one(w, g, m, v):
         g = jnp.clip(g, -clip_value, clip_value)
         m = beta1 * m + (1 - beta1) * g
         v = beta2 * v + (1 - beta2) * g ** 2
         m_hat = m / (1 - beta1 ** step)
         v_hat = v / (1 - beta2 ** step)
-        w = w + lr * m_hat / (jnp.sqrt(v_hat) + eps)
+        w = w + lr * m_hat / (jnp.sqrt(v_hat) + eps) - lr * weight_decay * w
         return w, m, v
 
     w_d, m_d, v_d = update_one(w_d, g_d, m_d, v_d)
@@ -264,6 +283,7 @@ class Network:
         beta2: float = 0.999,
         adam_eps: float = 1e-8,
         dropout_rate: float = 0.0,
+        weight_decay: float = 0.0,
     ):
         self.n_inputs = n_inputs
         self.n_hidden = n_hidden
@@ -271,6 +291,7 @@ class Network:
         self.config = config
         self.optimizer = optimizer
         self.dropout_rate = dropout_rate
+        self.weight_decay = weight_decay
 
         key_h, key_r, key_rng = random.split(key, 3)
         self.hidden = TwoCompNeuron(key_h, n_hidden, n_inputs, config)
@@ -330,7 +351,13 @@ class Network:
         return one_hot * (1 - cfg.loss_label_smoothing) + cfg.loss_label_smoothing / self.n_outputs
 
     def _update_weights(self, g_d, g_s, g_r, lr, clip_value):
-        """Apply gradients using the configured optimizer (SGD or Adam)."""
+        """Apply gradients using the configured optimizer (SGD or Adam).
+
+        Both branches use decoupled weight decay (subtract lr·λ·w
+        after the gradient step). For SGD this is equivalent to an
+        L2 loss penalty (λ/2)·||w||²; for Adam this is the AdamW
+        recipe — the decay does not pass through the 1/√v rescaling.
+        """
         if self.optimizer == "adam":
             self.adam_step = self.adam_step + 1
             result = _adam(
@@ -338,14 +365,15 @@ class Network:
                 g_d, g_s, g_r,
                 self.m_dend, self.m_soma, self.m_readout,
                 self.v_dend, self.v_soma, self.v_readout,
-                self.adam_step, lr, self.beta1, self.beta2, self.adam_eps, clip_value,
+                self.adam_step, lr, self.beta1, self.beta2, self.adam_eps,
+                clip_value, self.weight_decay,
             )
             (self.hidden.w_dend, self.hidden.w_soma, self.readout.w,
              self.m_dend, self.m_soma, self.m_readout,
              self.v_dend, self.v_soma, self.v_readout) = result
         else:
             self.hidden.w_dend, self.hidden.w_soma, self.readout.w = _apply(
-                *self._weights(), g_d, g_s, g_r, lr, clip_value,
+                *self._weights(), g_d, g_s, g_r, lr, clip_value, self.weight_decay,
             )
 
     # ── Single-sample API ──

@@ -41,6 +41,9 @@ def parse_args():
     p.add_argument("--no_kernel", action="store_true")
     p.add_argument("--spike_amplitude", type=float, default=1.0)
     p.add_argument("--dropout", type=float, default=0.0)
+    p.add_argument("--weight_decay", type=float, default=0.0,
+                   help="Decoupled weight decay (AdamW-style for Adam, "
+                        "L2-equivalent for SGD). Typical: 1e-5 to 1e-3.")
     p.add_argument("--optimizer", choices=["sgd", "adam"], default="sgd")
     p.add_argument("--beta1", type=float, default=0.9)
     p.add_argument("--beta2", type=float, default=0.999)
@@ -105,13 +108,14 @@ def main():
     net = Network(
         key, n_inputs, args.n_hidden, args.n_outputs, config,
         optimizer=args.optimizer, beta1=args.beta1, beta2=args.beta2, adam_eps=args.adam_eps,
-        dropout_rate=args.dropout,
+        dropout_rate=args.dropout, weight_decay=args.weight_decay,
     )
     opt_str = f"adam(β1={args.beta1},β2={args.beta2})" if args.optimizer == "adam" else "sgd"
     drop_str = f"  dropout={args.dropout}" if args.dropout > 0 else ""
+    wd_str = f"  weight_decay={args.weight_decay}" if args.weight_decay > 0 else ""
     print(
         f"Network: {n_inputs} -> {args.n_hidden} (2-comp) -> {args.n_outputs} (LIF readout)  "
-        f"optimizer={opt_str}  lr={args.lr}{drop_str}",
+        f"optimizer={opt_str}  lr={args.lr}{drop_str}{wd_str}",
         flush=True,
     )
 
