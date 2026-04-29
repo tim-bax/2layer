@@ -13,6 +13,11 @@ from .nmnist import (
     create_nmnist_input_jax,
     load_nmnist_data,
 )
+from .ssc import (
+    SSCDataLoader,
+    create_ssc_input_jax,
+    load_ssc_data,
+)
 
 __all__ = [
     "load_shd_data",
@@ -22,4 +27,7 @@ __all__ = [
     "load_nmnist_data",
     "create_nmnist_input_jax",
     "NMNISTDataLoader",
+    "load_ssc_data",
+    "create_ssc_input_jax",
+    "SSCDataLoader",
 ]
