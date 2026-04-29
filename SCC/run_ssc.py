@@ -94,8 +94,8 @@ def parse_args():
     p.add_argument(
         "--ssc_data_path",
         type=str,
-        default="/Users/tbax/Documents/SSC",
-        help="Path containing ssc_train.h5.gz, ssc_valid.h5.gz, ssc_test.h5.gz",
+        default=None,
+        help="SSC data path override. If unset, uses SSC_DATA_PATH or known machine paths.",
     )
     p.add_argument(
         "--eval_split",

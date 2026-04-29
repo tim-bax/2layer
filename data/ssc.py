@@ -168,10 +168,14 @@ def load_ssc_data(
     if data_path is None:
         if "SSC_DATA_PATH" in os.environ:
             data_path = os.environ["SSC_DATA_PATH"]
+        elif os.path.exists("/home/staff/t/tibax/Downloads/SSC_data"):
+            data_path = "/home/staff/t/tibax/Downloads/SSC_data"
+        elif os.path.exists("/share/neurocomputation/Tim/SSC_data"):
+            data_path = "/share/neurocomputation/Tim/SSC_data"
         elif os.path.exists("/Users/tbax/Documents/SSC"):
             data_path = "/Users/tbax/Documents/SSC"
         else:
-            data_path = os.path.expanduser("~/Documents/SSC")
+            data_path = os.path.expanduser("~/Downloads/SSC_data")
 
     data_loader = SSCDataLoader(data_path)
     train_images, train_labels = data_loader.get_dataset(
