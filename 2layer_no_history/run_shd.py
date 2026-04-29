@@ -45,6 +45,24 @@ from config import NeuronConfig
 from network import Network
 
 
+def apply_temporal_jitter(x_input, jitter_range: int):
+    """Shift one sample in time by a uniform integer offset in [-range, +range].
+
+    - One jitter value per sample (not per neuron/channel).
+    - Shifted indices are clamped to [0, T-1] (no wrap, no drop).
+    - Collisions from clamping/overlap are summed via np.add.at.
+    """
+    if jitter_range <= 0:
+        return np.asarray(x_input)
+    x_np = np.asarray(x_input)
+    T = x_np.shape[0]
+    shift = np.random.randint(-jitter_range, jitter_range + 1)
+    shifted_t = np.clip(np.arange(T) + shift, 0, T - 1)
+    out = np.zeros_like(x_np)
+    np.add.at(out, shifted_t, x_np)
+    return out
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Two-layer no_history model on SHD")
     p.add_argument("--T", type=int, default=700)
@@ -71,6 +89,17 @@ def parse_args():
     p.add_argument("--dropout_hidden", type=float, default=0.0,
                    help="Dropout rate on hidden-layer spikes (hidden → readout). "
                         "This is the dropout knob from no_history.")
+    p.add_argument(
+        "--augment_jitter",
+        action="store_true",
+        help="Enable temporal jitter augmentation on training inputs only.",
+    )
+    p.add_argument(
+        "--jitter_range",
+        type=int,
+        default=10,
+        help="Temporal jitter range in timesteps (uniform in [-range, +range]).",
+    )
     p.add_argument("--weight_decay", type=float, default=0.0,
                    help="Decoupled weight decay (AdamW-style for Adam, "
                         "L2-equivalent for SGD). Typical: 1e-5 to 1e-3.")
@@ -118,6 +147,8 @@ def main():
             f"--precision mismatch during startup ({args.precision} vs {_PRECISION}). "
             "Pass --precision only once."
         )
+    if args.jitter_range < 0:
+        raise ValueError("--jitter_range must be >= 0")
     np.random.seed(args.seed)
     key = random.PRNGKey(args.seed)
     B = args.batch_size
@@ -157,11 +188,14 @@ def main():
     drop_str = ""
     if args.dropout_extra > 0 or args.dropout_hidden > 0:
         drop_str = f"  dropout_extra={args.dropout_extra} dropout_hidden={args.dropout_hidden}"
+    jitter_str = ""
+    if args.augment_jitter:
+        jitter_str = f"  augment_jitter=True(range=±{args.jitter_range})"
     wd_str = f"  weight_decay={args.weight_decay}" if args.weight_decay > 0 else ""
     print(
         f"Network: {n_inputs} -> {args.n_extra} (2-comp) -> {args.n_hidden} (2-comp) "
         f"-> {args.n_outputs} (LIF readout)  "
-        f"optimizer={opt_str}  lr={args.lr}{drop_str}{wd_str}",
+        f"optimizer={opt_str}  lr={args.lr}{drop_str}{jitter_str}{wd_str}",
         flush=True,
     )
 
@@ -199,12 +233,20 @@ def main():
 
             if B == 1:
                 x, y = train_data[int(batch_idx[0])]
+                if args.augment_jitter:
+                    x = apply_temporal_jitter(x, args.jitter_range)
                 loss, pred, gnorms = net.train_step(
                     jnp.array(x), int(y), lr=args.lr, clip_value=args.gradient_clip,
                 )
                 batch_correct = int(pred == int(y))
             else:
-                x_batch = jnp.stack([train_data[int(i)][0] for i in batch_idx])
+                x_batch_np = [
+                    apply_temporal_jitter(train_data[int(i)][0], args.jitter_range)
+                    if args.augment_jitter
+                    else train_data[int(i)][0]
+                    for i in batch_idx
+                ]
+                x_batch = jnp.stack(x_batch_np)
                 y_batch = jnp.array([int(train_data[int(i)][1]) for i in batch_idx])
                 loss, preds, gnorms = net.batch_train_step(
                     x_batch, y_batch, lr=args.lr, clip_value=args.gradient_clip,
