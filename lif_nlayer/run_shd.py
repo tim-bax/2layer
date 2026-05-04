@@ -59,7 +59,10 @@ def parse_args():
         default="64,64",
         help="Comma-separated hidden layer widths, e.g. 128,64",
     )
-    p.add_argument("--n-classes", type=int, default=20, dest="n_classes")
+    p.add_argument(
+        "--n-classes", "--n_classes", type=int, default=20, dest="n_classes",
+        help="Number of readout / class neurons (alias: --n_classes)",
+    )
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--lr", type=float, default=1e-3)
