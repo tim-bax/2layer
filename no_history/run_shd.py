@@ -32,7 +32,7 @@ if _ROOT not in sys.path:
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from data import create_shd_input_jax, load_shd_data
+from data.shd_binned import load_shd_binned
 from config import NeuronConfig
 from network import Network
 
@@ -56,8 +56,17 @@ def apply_temporal_jitter(x_input, jitter_range: int):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="No-history model on SHD")
-    p.add_argument("--T", type=int, default=700)
+    p = argparse.ArgumentParser(description="No-history model on SHD (count-bin preprocessing)")
+    p.add_argument("--bin_size_ms", type=float, default=4.0,
+                   help="Time bin width in ms (paper default 4.0; also try 10, 14).")
+    p.add_argument("--collapse_factor", type=int, default=5,
+                   help="Sum-pool every N consecutive input channels (paper default 5: 700 -> 140).")
+    p.add_argument("--max_duration_ms", type=float, default=1400.0,
+                   help="Fixed window length in ms (paper default 1400). Sets T = ceil(max_duration_ms / bin_size_ms).")
+    p.add_argument("--binarize", action="store_true",
+                   help="Cap per-bin counts at 1 instead of feeding raw counts.")
+    p.add_argument("--input_scale", type=float, default=1.0,
+                   help="Multiplicative scale on the binned input (default 1.0; raw counts).")
     p.add_argument("--n_hidden", type=int, default=64)
     p.add_argument("--n_outputs", type=int, default=20)
     p.add_argument("--epochs", type=int, default=10)
@@ -71,8 +80,16 @@ def parse_args():
     p.add_argument("--beta_s", type=float, default=1.0)
     p.add_argument("--beta_d", type=float, default=1.5)
     p.add_argument("--weight_scale", type=float, default=0.25)
-    p.add_argument("--no_kernel", action="store_true")
-    p.add_argument("--spike_amplitude", type=float, default=1.0)
+    p.add_argument("--tau_soma", type=float, default=15.0,
+                   help="Soma membrane time constant (physical ms; default 15.0).")
+    p.add_argument("--tau_dend", type=float, default=15.0,
+                   help="Dendritic membrane time constant (physical ms; default 15.0).")
+    p.add_argument("--tau_m", type=float, default=20.0,
+                   help="Readout LIF membrane time constant (physical ms; default 20.0).")
+    p.add_argument("--tau_plat_min", type=float, default=100.0,
+                   help="Plateau duration min (physical ms; default 100).")
+    p.add_argument("--tau_plat_max", type=float, default=350.0,
+                   help="Plateau duration max (physical ms; default 350).")
     p.add_argument("--dropout", type=float, default=0.0)
     p.add_argument(
         "--augment_jitter",
@@ -138,30 +155,56 @@ def main():
     key = random.PRNGKey(args.seed)
     B = args.batch_size
 
-    print("Loading SHD data...", flush=True)
-    train_raw, test_raw = load_shd_data()
-    input_kw = {
-        "T": args.T,
-        "use_kernel": not args.no_kernel,
-        "spike_amplitude": args.spike_amplitude,
-    }
-    train_data = [(create_shd_input_jax(x, **input_kw), y) for x, y in train_raw]
-    test_data = [(create_shd_input_jax(x, **input_kw), y) for x, y in test_raw]
+    print("Loading SHD data with count-bin preprocessing...", flush=True)
+    dtype = np.float64 if args.precision == "64" else np.float32
+    X_tr, y_tr, _, X_te, y_te, _ = load_shd_binned(
+        bin_size_ms=args.bin_size_ms,
+        collapse_factor=args.collapse_factor,
+        max_duration_ms=args.max_duration_ms,
+        binarize=args.binarize,
+        dtype=dtype,
+    )
+    if args.input_scale != 1.0:
+        X_tr = X_tr * args.input_scale
+        X_te = X_te * args.input_scale
+    train_data = [(X_tr[i], int(y_tr[i])) for i in range(len(y_tr))]
+    test_data = [(X_te[i], int(y_te[i])) for i in range(len(y_te))]
+    T = train_data[0][0].shape[0]
     n_inputs = train_data[0][0].shape[1]
     print(
         f"Train: {len(train_data)}  Test: {len(test_data)}  "
-        f"n_inputs: {n_inputs}  T: {args.T}  batch_size: {B}  "
-        f"precision=float{args.precision}",
+        f"n_inputs: {n_inputs}  T: {T}  batch_size: {B}  "
+        f"precision=float{args.precision}  "
+        f"bin={args.bin_size_ms}ms  collapse={args.collapse_factor}  "
+        f"binarize={args.binarize}  input_scale={args.input_scale}",
         flush=True,
     )
 
     config = NeuronConfig(
+        dt=args.bin_size_ms,
+        tau_soma=args.tau_soma,
+        tau_dend=args.tau_dend,
+        tau_m=args.tau_m,
+        tau_plat_min=args.tau_plat_min,
+        tau_plat_max=args.tau_plat_max,
         beta_s=args.beta_s,
         beta_d=args.beta_d,
         weight_scale=args.weight_scale,
         loss_temperature=args.loss_temperature,
         loss_count_bias=args.loss_count_bias,
         loss_label_smoothing=args.loss_label_smoothing,
+    )
+    alpha_s = float(np.exp(-config.dt / config.tau_soma))
+    alpha_d = float(np.exp(-config.dt / config.tau_dend))
+    alpha_m = float(np.exp(-config.dt / config.tau_m))
+    print(
+        f"Neuron dynamics: dt={config.dt}ms (=bin_size_ms), "
+        f"tau_soma={config.tau_soma}ms -> alpha_s={alpha_s:.4f}, "
+        f"tau_dend={config.tau_dend}ms -> alpha_d={alpha_d:.4f}, "
+        f"tau_m={config.tau_m}ms -> alpha_m={alpha_m:.4f}, "
+        f"plateau in [{config.tau_plat_min}, {config.tau_plat_max}]ms "
+        f"= [{int(config.tau_plat_min/config.dt)}, {int(config.tau_plat_max/config.dt)}] steps",
+        flush=True,
     )
     net = Network(
         key, n_inputs, args.n_hidden, args.n_outputs, config,
