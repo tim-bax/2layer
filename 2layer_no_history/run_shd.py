@@ -101,6 +101,12 @@ def parse_args():
                    help="Plateau duration min (physical ms; default 100).")
     p.add_argument("--tau_plat_max", type=float, default=350.0,
                    help="Plateau duration max (physical ms; default 350).")
+    p.add_argument("--mu_th", type=float, default=1.0,
+                   help="Dendritic plateau threshold (default 1.0). Lower if plateaus rarely fire.")
+    p.add_argument("--v_th", type=float, default=1.0,
+                   help="Somatic spike threshold (default 1.0). Lower if neurons rarely spike.")
+    p.add_argument("--gamma", type=float, default=0.5,
+                   help="Plateau-induced threshold reduction (default 0.5). Effective v_th = v_th - gamma*h.")
     p.add_argument("--dropout_extra", type=float, default=0.0,
                    help="Dropout rate on extra-layer spikes (extra → hidden).")
     p.add_argument("--dropout_hidden", type=float, default=0.0,
@@ -202,6 +208,9 @@ def main():
         tau_m=args.tau_m,
         tau_plat_min=args.tau_plat_min,
         tau_plat_max=args.tau_plat_max,
+        mu_th=args.mu_th,
+        v_th=args.v_th,
+        gamma=args.gamma,
         beta_s=args.beta_s,
         beta_d=args.beta_d,
         weight_scale=args.weight_scale,
