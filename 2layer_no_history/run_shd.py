@@ -130,6 +130,17 @@ def parse_args():
     p.add_argument("--beta1", type=float, default=0.9)
     p.add_argument("--beta2", type=float, default=0.999)
     p.add_argument("--adam_eps", type=float, default=1e-8)
+    p.add_argument("--lr_patience", type=int, default=5,
+                   help="ReduceLROnPlateau patience (epochs without test-acc improvement). "
+                        "0 disables scheduling.")
+    p.add_argument("--lr_factor", type=float, default=0.7,
+                   help="ReduceLROnPlateau multiplier (lr := lr * factor). "
+                        "Set to 1.0 to disable.")
+    p.add_argument("--lr_min", type=float, default=1e-6,
+                   help="LR floor; scheduler will not reduce below this.")
+    p.add_argument("--early_stop_patience", type=int, default=0,
+                   help="Stop training if no test-acc improvement for this many epochs. "
+                        "0 disables.")
     p.add_argument(
         "--precision",
         choices=["32", "64"],
@@ -272,6 +283,12 @@ def main():
     log_interval = 1000
     log_every = max(1, log_interval // B)
 
+    current_lr = args.lr
+    best_test_acc = 0.0
+    best_epoch = 0
+    epochs_since_lr_drop = 0
+    epochs_without_improvement = 0
+
     for epoch in range(1, args.epochs + 1):
         idx = np.random.permutation(n_train)
         losses = []
@@ -288,7 +305,7 @@ def main():
                 if args.augment_jitter:
                     x = apply_temporal_jitter(x, args.jitter_range)
                 loss, pred, gnorms = net.train_step(
-                    jnp.array(x), int(y), lr=args.lr, clip_value=args.gradient_clip,
+                    jnp.array(x), int(y), lr=current_lr, clip_value=args.gradient_clip,
                 )
                 batch_correct = int(pred == int(y))
             else:
@@ -301,7 +318,7 @@ def main():
                 x_batch = jnp.stack(x_batch_np)
                 y_batch = jnp.array([int(train_data[int(i)][1]) for i in batch_idx])
                 loss, preds, gnorms = net.batch_train_step(
-                    x_batch, y_batch, lr=args.lr, clip_value=args.gradient_clip,
+                    x_batch, y_batch, lr=current_lr, clip_value=args.gradient_clip,
                 )
                 batch_correct = int(jnp.sum(preds == y_batch))
 
@@ -335,15 +352,49 @@ def main():
         train_acc = 100.0 * correct / max(samples_per_epoch, 1)
         test_acc = evaluate(net, test_data, B)
         avg_loss = float(np.mean(losses)) if losses else 0.0
+
+        improved = test_acc > best_test_acc
+        if improved:
+            best_test_acc = test_acc
+            best_epoch = epoch
+            epochs_since_lr_drop = 0
+            epochs_without_improvement = 0
+            marker = "  *best"
+        else:
+            epochs_since_lr_drop += 1
+            epochs_without_improvement += 1
+            marker = ""
+
         print(
             f"Epoch {epoch:03d} | loss={avg_loss:.4f} "
             f"train_acc={train_acc:.2f}% test_acc={test_acc:.2f}% "
-            f"({epoch_elapsed:.1f}s)",
+            f"lr={current_lr:.2e} ({epoch_elapsed:.1f}s){marker}",
             flush=True,
         )
 
+        if (args.lr_factor < 1.0
+                and args.lr_patience > 0
+                and current_lr > args.lr_min
+                and epochs_since_lr_drop >= args.lr_patience):
+            new_lr = max(current_lr * args.lr_factor, args.lr_min)
+            if new_lr < current_lr:
+                print(f"  LR scheduler: {current_lr:.2e} -> {new_lr:.2e} "
+                      f"(no improvement for {epochs_since_lr_drop} epochs)", flush=True)
+                current_lr = new_lr
+                epochs_since_lr_drop = 0
+
+        if (args.early_stop_patience > 0
+                and epochs_without_improvement >= args.early_stop_patience):
+            print(f"  Early stopping: no improvement for "
+                  f"{epochs_without_improvement} epochs.", flush=True)
+            break
+
     final_acc = evaluate(net, test_data, B)
-    print(f"\nFinal test accuracy: {final_acc:.2f}%", flush=True)
+    print(
+        f"\nFinal test accuracy: {final_acc:.2f}%  |  "
+        f"Best test accuracy: {best_test_acc:.2f}% (epoch {best_epoch})",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
