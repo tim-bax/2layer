@@ -21,6 +21,8 @@ class NeuronConfig:
     loss_temperature: float = 5.0
     loss_count_bias: float = 0.1
     loss_label_smoothing: float = 0.2
+    bn_eps: float = 1e-5
+    bn_momentum: float = 0.1
 
 
 @jit

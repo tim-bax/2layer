@@ -38,8 +38,14 @@ class TwoCompNeuron:
         )
 
     @staticmethod
-    def forward_step(carry, dend_in, soma_in, t, alpha_s, alpha_d, T_p, config):
-        """Pure-function forward step for one timestep. JIT-friendly."""
+    def forward_step(carry, dend_in, soma_in, t, alpha_s, alpha_d, T_p, gamma, config):
+        """Pure-function forward step for one timestep. JIT-friendly.
+
+        `gamma` is a per-neuron array of shape (n_neurons,) that scales the
+        plateau-induced threshold reduction (effective threshold per neuron i
+        is v_th - gamma[i] * h[i]). Pass `jnp.full((n,), config.gamma)` to
+        replicate the previous scalar behaviour.
+        """
         mu_prev, v_prev, h_prev, t_prime_prev, mu_at_tprime_prev, E_soma, dmu_dw, dmu_dw_at_tprime = carry
 
         t_prime = jnp.where(t == 0, 0, jnp.where(h_prev == 1, t_prime_prev, t))
@@ -55,7 +61,8 @@ class TwoCompNeuron:
         ).astype(jnp.int32)
 
         v_pre_reset = jnp.where(t > 0, alpha_s * v_prev + soma_in, soma_in)
-        o = jnp.where(v_pre_reset >= config.v_th - config.gamma * h, 1, 0).astype(jnp.int32)
+        threshold = config.v_th - gamma * h
+        o = jnp.where(v_pre_reset >= threshold, 1, 0).astype(jnp.int32)
         v = v_pre_reset * (1 - o)
 
         new_carry = (mu, v, h, t_prime, mu_at_tprime, E_soma, dmu_dw, dmu_dw_at_tprime)

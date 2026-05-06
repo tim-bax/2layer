@@ -78,7 +78,7 @@ def run_forward_collect(net, x_input):
         dend_in = x_t @ h.w_dend.T
         soma_in = x_t @ h.w_soma.T
         h_carry, h_o, h_v_pre, h_h, h_h_prev, h_mu_at_tp = TwoCompNeuron.forward_step(
-            h_carry, dend_in, soma_in, t, h.alpha_s, h.alpha_d, h.T_p, config,
+            h_carry, dend_in, soma_in, t, h.alpha_s, h.alpha_d, h.T_p, net.gamma_h, config,
         )
         hidden_o_float = h_o.astype(jnp.float64)
         r_carry, r_o, r_v_pre, r_E = LIFNeuron.forward_step(

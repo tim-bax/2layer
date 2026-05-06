@@ -95,7 +95,26 @@ def parse_args():
     p.add_argument("--v_th", type=float, default=1.0,
                    help="Somatic spike threshold (default 1.0). Lower if neurons rarely spike.")
     p.add_argument("--gamma", type=float, default=0.5,
-                   help="Plateau-induced threshold reduction (default 0.5). Effective v_th = v_th - gamma*h.")
+                   help="Plateau-induced threshold reduction (default 0.5). Effective v_th = v_th - gamma*h. "
+                        "Used as the per-neuron initial value of gamma_h.")
+    p.add_argument("--train_gamma", action="store_true",
+                   help="Make per-neuron gamma_h trainable (reparam: gamma_h = v_th * sigmoid(rho_h)).")
+    p.add_argument("--lr_gamma", type=float, default=None,
+                   help="Learning rate for rho_h. Defaults to --lr if unset. "
+                        "Has no effect unless --train_gamma is set.")
+    p.add_argument("--use_bn", action="store_true",
+                   help="Apply batch-norm to soma and dend pre-activations (SpArch-style). "
+                        "Uses frozen-stats e-prop approximation: μ, σ² treated as stop_gradient "
+                        "so the gradient code remains per-sample / online. Effectively useless "
+                        "with batch_size=1; use --batch_size >= 8 or so.")
+    p.add_argument("--no_train_bn", action="store_true",
+                   help="If set with --use_bn, BN normalises but γ_BN, β_BN stay frozen at 1, 0.")
+    p.add_argument("--lr_bn", type=float, default=None,
+                   help="Learning rate for γ_BN, β_BN. Defaults to --lr if unset.")
+    p.add_argument("--bn_momentum", type=float, default=0.1,
+                   help="Running-stats momentum for batch-norm (0.1 matches PyTorch default).")
+    p.add_argument("--bn_eps", type=float, default=1e-5,
+                   help="Numerical stabiliser for batch-norm.")
     p.add_argument("--dropout", type=float, default=0.0)
     p.add_argument(
         "--augment_jitter",
@@ -213,6 +232,8 @@ def main():
         loss_temperature=args.loss_temperature,
         loss_count_bias=args.loss_count_bias,
         loss_label_smoothing=args.loss_label_smoothing,
+        bn_eps=args.bn_eps,
+        bn_momentum=args.bn_momentum,
     )
     alpha_s = float(np.exp(-config.dt / config.tau_soma))
     alpha_d = float(np.exp(-config.dt / config.tau_dend))
@@ -230,6 +251,8 @@ def main():
         key, n_inputs, args.n_hidden, args.n_outputs, config,
         optimizer=args.optimizer, beta1=args.beta1, beta2=args.beta2, adam_eps=args.adam_eps,
         dropout_rate=args.dropout, weight_decay=args.weight_decay,
+        train_gamma=args.train_gamma, lr_gamma=args.lr_gamma,
+        use_bn=args.use_bn, train_bn=not args.no_train_bn, lr_bn=args.lr_bn,
     )
     opt_str = f"adam(β1={args.beta1},β2={args.beta2})" if args.optimizer == "adam" else "sgd"
     drop_str = f"  dropout={args.dropout}" if args.dropout > 0 else ""
@@ -237,9 +260,18 @@ def main():
     if args.augment_jitter:
         jitter_str = f"  augment_jitter=True(range=±{args.jitter_range})"
     wd_str = f"  weight_decay={args.weight_decay}" if args.weight_decay > 0 else ""
+    gamma_str = ""
+    if args.train_gamma:
+        eff_lr_gamma = args.lr if args.lr_gamma is None else args.lr_gamma
+        gamma_str = f"  train_gamma=True(init={args.gamma}, lr_gamma={eff_lr_gamma:.2e})"
+    bn_str = ""
+    if args.use_bn:
+        eff_lr_bn = args.lr if args.lr_bn is None else args.lr_bn
+        bn_str = (f"  use_bn=True(momentum={args.bn_momentum}, "
+                  f"train_bn={not args.no_train_bn}, lr_bn={eff_lr_bn:.2e})")
     print(
         f"Network: {n_inputs} -> {args.n_hidden} (2-comp) -> {args.n_outputs} (LIF readout)  "
-        f"optimizer={opt_str}  lr={args.lr}{drop_str}{jitter_str}{wd_str}",
+        f"optimizer={opt_str}  lr={args.lr}{drop_str}{jitter_str}{wd_str}{gamma_str}{bn_str}",
         flush=True,
     )
 
@@ -346,10 +378,15 @@ def main():
             epochs_without_improvement += 1
             marker = ""
 
+        gamma_log = ""
+        if args.train_gamma:
+            gh = np.asarray(net.gamma_h)
+            gamma_log = (f" gamma_h(min/mean/max)="
+                         f"{gh.min():.3f}/{gh.mean():.3f}/{gh.max():.3f}")
         print(
             f"Epoch {epoch:03d} | loss={avg_loss:.4f} "
             f"train_acc={train_acc:.2f}% test_acc={test_acc:.2f}% "
-            f"lr={current_lr:.2e} ({epoch_elapsed:.1f}s){marker}",
+            f"lr={current_lr:.2e} ({epoch_elapsed:.1f}s){marker}{gamma_log}",
             flush=True,
         )
 
