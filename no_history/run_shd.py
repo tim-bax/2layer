@@ -383,10 +383,22 @@ def main():
             gh = np.asarray(net.gamma_h)
             gamma_log = (f" gamma_h(min/mean/max)="
                          f"{gh.min():.3f}/{gh.mean():.3f}/{gh.max():.3f}")
+        bn_log = ""
+        if args.use_bn:
+            gs = np.asarray(net.gamma_BN_s); bs = np.asarray(net.beta_BN_s)
+            gd = np.asarray(net.gamma_BN_d); bd = np.asarray(net.beta_BN_d)
+            rms = np.asarray(net.running_mean_s); rvs = np.asarray(net.running_var_s)
+            rmd = np.asarray(net.running_mean_d); rvd = np.asarray(net.running_var_d)
+            bn_log = (
+                f"\n  BN soma  γ[{gs.min():+.2f},{gs.max():+.2f}] β[{bs.min():+.2f},{bs.max():+.2f}]"
+                f"  μ̄={rms.mean():+.3f}±{rms.std():.3f}  σ̄²={rvs.mean():.4f}±{rvs.std():.4f}"
+                f"\n  BN dend  γ[{gd.min():+.2f},{gd.max():+.2f}] β[{bd.min():+.2f},{bd.max():+.2f}]"
+                f"  μ̄={rmd.mean():+.3f}±{rmd.std():.3f}  σ̄²={rvd.mean():.4f}±{rvd.std():.4f}"
+            )
         print(
             f"Epoch {epoch:03d} | loss={avg_loss:.4f} "
             f"train_acc={train_acc:.2f}% test_acc={test_acc:.2f}% "
-            f"lr={current_lr:.2e} ({epoch_elapsed:.1f}s){marker}{gamma_log}",
+            f"lr={current_lr:.2e} ({epoch_elapsed:.1f}s){marker}{gamma_log}{bn_log}",
             flush=True,
         )
 

@@ -550,9 +550,12 @@ class Network:
         """Project x with W and apply BN (batch or running stats).
 
         x: (T, K) for single-sample, (B, T, K) for batched.
-        Returns soma_in_BN, dend_in_BN, z_norm_s, z_norm_d (same leading
-        shape as x, last dim N). When training, also updates running stats
-        in place on `self`.
+        Returns soma_in_BN, dend_in_BN, z_norm_s, z_norm_d, var_used_s,
+        var_used_d. The `var_used_*` outputs are the variance the FORWARD
+        actually divided by — batch_var when training, running_var when
+        eval. The frozen-stats BN backward uses these so the W-gradient
+        scale matches the forward (otherwise running/batch mismatch
+        early in training distorts the gradient magnitude).
         """
         z_soma_raw = jnp.einsum("...k,ik->...i", x, self.hidden.w_soma)
         z_dend_raw = jnp.einsum("...k,ik->...i", x, self.hidden.w_dend)
@@ -572,6 +575,7 @@ class Network:
                 self.running_mean_d, self.running_var_d = self._bn_update_running(
                     mean_d, var_d, self.running_mean_d, self.running_var_d,
                 )
+            return soma_BN, dend_BN, z_norm_s, z_norm_d, var_s, var_d
         else:
             soma_BN, z_norm_s = self._bn_eval(
                 z_soma_raw, self.gamma_BN_s, self.beta_BN_s,
@@ -581,7 +585,8 @@ class Network:
                 z_dend_raw, self.gamma_BN_d, self.beta_BN_d,
                 self.running_mean_d, self.running_var_d,
             )
-        return soma_BN, dend_BN, z_norm_s, z_norm_d
+            return (soma_BN, dend_BN, z_norm_s, z_norm_d,
+                    self.running_var_s, self.running_var_d)
 
     def _smooth_targets(self, targets):
         """Scalar label or (B,) labels → smoothed one-hot vector(s)."""
@@ -661,9 +666,10 @@ class Network:
         """
         T = x_input.shape[0]
 
-        soma_BN, dend_BN, z_norm_s, z_norm_d = self._project_and_bn(x_input, training=True)
-        bn_scale_s = self._bn_scale(self.gamma_BN_s, self.running_var_s)
-        bn_scale_d = self._bn_scale(self.gamma_BN_d, self.running_var_d)
+        (soma_BN, dend_BN, z_norm_s, z_norm_d,
+         var_used_s, var_used_d) = self._project_and_bn(x_input, training=True)
+        bn_scale_s = self._bn_scale(self.gamma_BN_s, var_used_s)
+        bn_scale_d = self._bn_scale(self.gamma_BN_d, var_used_d)
 
         (counts, A_r, A_s, A_d, A_gamma,
          A_g_BN_s, A_b_BN_s, A_g_BN_d, A_b_BN_d) = _fwd_single(
@@ -701,7 +707,7 @@ class Network:
 
     def predict(self, x_input):
         """Predict one sample (no dropout, BN with running stats)."""
-        soma_BN, dend_BN, _, _ = self._project_and_bn(x_input, training=False)
+        soma_BN, dend_BN, _, _, _, _ = self._project_and_bn(x_input, training=False)
         counts = _pred_single(x_input, dend_BN, soma_BN, self.readout.w, *self._params())
         return int(jnp.argmax(counts))
 
@@ -717,9 +723,10 @@ class Network:
         # BN forward (across (B, T) per neuron) is computed *outside* the
         # vmap so batch stats are well-defined. The vmap then sees per-sample
         # (T, N) BN'd inputs.
-        soma_BN, dend_BN, z_norm_s, z_norm_d = self._project_and_bn(x_batch, training=True)
-        bn_scale_s = self._bn_scale(self.gamma_BN_s, self.running_var_s)
-        bn_scale_d = self._bn_scale(self.gamma_BN_d, self.running_var_d)
+        (soma_BN, dend_BN, z_norm_s, z_norm_d,
+         var_used_s, var_used_d) = self._project_and_bn(x_batch, training=True)
+        bn_scale_s = self._bn_scale(self.gamma_BN_s, var_used_s)
+        bn_scale_d = self._bn_scale(self.gamma_BN_d, var_used_d)
 
         (counts, A_r, A_s, A_d, A_gamma,
          A_g_BN_s, A_b_BN_s, A_g_BN_d, A_b_BN_d) = _fwd_batch(
@@ -766,7 +773,7 @@ class Network:
 
     def batch_predict(self, x_batch):
         """Predict B samples in parallel. x_batch: (B,T,K) → (B,) int labels."""
-        soma_BN, dend_BN, _, _ = self._project_and_bn(x_batch, training=False)
+        soma_BN, dend_BN, _, _, _, _ = self._project_and_bn(x_batch, training=False)
         counts = _pred_batch(
             x_batch, dend_BN, soma_BN, self.readout.w, *self._params(),
         )
