@@ -37,3 +37,22 @@ class LIFNeuron:
 
         new_carry = (v, readout_counts, E_readout)
         return new_carry, o, v_pre_reset, E_readout
+
+    @staticmethod
+    def forward_step_integrate_only(carry, spike_input, w, alpha_m):
+        """Leaky integrate readout without threshold, reset, or spike counting.
+
+        Same recurrent filter E_readout as the spiking step; per-class membrane
+        v_j is tracked for max-over-time loss and exact ∂L/∂w readout.
+
+        Args:
+            carry: (v, readout_counts, E_readout_prev) same 3-tuple as forward_step;
+                   readout_counts are left unchanged.
+        """
+        v_prev, readout_counts, E_readout_prev = carry
+
+        readout_in = spike_input @ w.T
+        v = alpha_m * v_prev + readout_in
+        E_readout = alpha_m * E_readout_prev + spike_input
+        new_carry = (v, readout_counts, E_readout)
+        return new_carry, v, E_readout

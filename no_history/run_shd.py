@@ -238,7 +238,7 @@ def main():
         jitter_str = f"  augment_jitter=True(range=±{args.jitter_range})"
     wd_str = f"  weight_decay={args.weight_decay}" if args.weight_decay > 0 else ""
     print(
-        f"Network: {n_inputs} -> {args.n_hidden} (2-comp) -> {args.n_outputs} (LIF readout)  "
+        f"Network: {n_inputs} -> {args.n_hidden} (2-comp) -> {args.n_outputs} (integrate, max-t CE)  "
         f"optimizer={opt_str}  lr={args.lr}{drop_str}{jitter_str}{wd_str}",
         flush=True,
     )

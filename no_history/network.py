@@ -14,22 +14,39 @@ from lif_neuron import LIFNeuron
 #    jit(vmap(fn, ...)) → fast batched execution (B samples in parallel)
 # ══════════════════════════════════════════════════════════════════════
 
+def _sliding_argmax_mu(mu, T_p):
+    """For each timestep t and hidden neuron i, index of the maximum μ in the window.
+
+    g[t, i] = argmax_{s ∈ [max(0, t − T_p[i] + 1), t]} μ[s, i].
+
+    Used only in the backward (dendritic credit heuristic); forward dynamics unchanged.
+    """
+    T = mu.shape[0]
+
+    def argmax_up_to_t(t_cur):
+        lo = jnp.maximum(0, t_cur - T_p + 1)
+        rows = jnp.arange(T, dtype=jnp.int32)[:, None]
+        mask = (rows >= lo[None, :]) & (rows <= t_cur)
+        neg = jnp.array(-jnp.finfo(mu.dtype).max, dtype=mu.dtype)
+        masked = jnp.where(mask, mu, neg)
+        return jnp.argmax(masked, axis=0)
+
+    return vmap(argmax_up_to_t)(jnp.arange(T, dtype=jnp.int32))
+
+
 def _forward_and_accum(
     x_input, w_dend, w_soma, w_readout,
     alpha_s, alpha_d, alpha_m, T_p, config,
-    h_carry_init, r_carry_init, A_d_init,
+    h_carry_init, r_carry_init,
     rng_key, dropout_rate,
 ):
-    """Forward pass + gradient accumulator bookkeeping for one sample.
+    """Forward pass for one sample; stack trajectories for max-over-time loss / e-prop.
 
-    x_input:      (T, K)  input spike train
-    h_carry_init: 8-tuple of hidden-neuron state zeros
-    r_carry_init: 3-tuple of readout-neuron state zeros
-    A_d_init:     (J, N, K) dendritic accumulator zeros
-    rng_key:      PRNG key for dropout masks
-    dropout_rate: fraction of hidden spikes to drop (0.0 = no dropout)
+    Readout: leaky integrate-and-fire *without* thresholding or reset (paper-style).
 
-    Returns: readout_counts (J,), A_readout (J,N), A_soma (J,N,K), A_dend (J,N,K)
+    Returns stacked (time-first):
+      v_readout (T, J), mu_tr (T, N), dmu_tr (T, N, K), sp_hidden (T, N),
+      E_soma_tr (T, K), E_readout_tr (T, N).
     """
     dend_inputs = x_input @ w_dend.T
     soma_inputs = x_input @ w_soma.T
@@ -40,7 +57,7 @@ def _forward_and_accum(
     dropout_scale = 1.0 / (1.0 - dropout_rate)
 
     def step(carry, inputs):
-        h_carry, r_carry, A_d = carry
+        h_carry, r_carry = carry
         dend_in, soma_in, x_t, t, drop_key = inputs
 
         h_carry, h_o, h_v_pre, h_h, h_h_prev, h_mu_at_tp = TwoCompNeuron.forward_step(
@@ -48,14 +65,11 @@ def _forward_and_accum(
         )
         hidden_o_float = h_o.astype(jnp.float64)
 
-        # Dropout: randomly zero out hidden spikes before the readout sees them.
-        # Surviving spikes are scaled by 1/(1-p) so expected value is unchanged.
-        # At dropout_rate=0.0 the mask is all-ones and scale is 1.0 (no-op).
         mask = random.bernoulli(drop_key, 1.0 - dropout_rate, (n_hidden,)).astype(jnp.float64)
         hidden_o_float = hidden_o_float * mask * dropout_scale
 
-        r_carry, r_o, r_v_pre, r_E = LIFNeuron.forward_step(
-            r_carry, hidden_o_float, w_readout, alpha_m, config.v_th,
+        r_carry, r_v, r_E = LIFNeuron.forward_step_integrate_only(
+            r_carry, hidden_o_float, w_readout, alpha_m,
         )
 
         mu_c, v_c, h_c, tp_c, matp_c, E_soma_c, dmu_c, dmu_atp_c = h_carry
@@ -67,98 +81,125 @@ def _forward_and_accum(
         )
         h_carry = (mu_c, v_c, h_c, tp_c, matp_c, E_soma_new, dmu_new, dmu_atp_new)
 
-        sp_readout = surrogate_sigma(r_v_pre - config.v_th, config.beta_s)
+        mu_out = mu_c
         sp_hidden = surrogate_sigma(
             h_v_pre + config.gamma * h_h - config.v_th, config.beta_s,
         )
-        hp_hidden = surrogate_sigma(h_mu_at_tp - config.mu_th, config.beta_d)
 
-        eta = sp_readout[:, None] * w_readout * sp_hidden[None, :]
-        eta_d = eta * (hp_hidden * config.gamma)[None, :]
-        A_d = A_d + jnp.einsum("ji,ik->jik", eta_d, dmu_atp_new)
-
-        new_carry = (h_carry, r_carry, A_d)
-        per_step = (sp_readout, sp_hidden, r_E, E_soma_new)
+        new_carry = (h_carry, r_carry)
+        per_step = (r_v, sp_hidden, E_soma_new, mu_out, dmu_new, r_E)
         return new_carry, per_step
 
-    init_carry = (h_carry_init, r_carry_init, A_d_init)
+    init_carry = (h_carry_init, r_carry_init)
     scan_inputs = (dend_inputs, soma_inputs, x_input, time_indices, dropout_keys)
-    final_carry, per_step_all = lax.scan(step, init_carry, scan_inputs)
+    _, per_step_all = lax.scan(step, init_carry, scan_inputs)
 
-    sp_r, sp_h, E_r, E_s = per_step_all
-    _, r_carry_f, A_d_f = final_carry
-    readout_counts = r_carry_f[1]
-
-    A_readout = jnp.einsum("ti,tj->ij", sp_r, E_r)
-    C_soma = jnp.einsum("tj,ti,tk->jik", sp_r, sp_h, E_s)
-    A_soma = w_readout[:, :, None] * C_soma
-
-    return readout_counts, A_readout, A_soma, A_d_f
+    v_readout, sp_hidden, E_soma_tr, mu_tr, dmu_tr, E_readout_tr = per_step_all
+    return v_readout, mu_tr, dmu_tr, sp_hidden, E_soma_tr, E_readout_tr
 
 
 def _predict_only(
     x_input, w_dend, w_soma, w_readout,
     alpha_s, alpha_d, alpha_m, T_p, config,
 ):
-    """Forward pass only — no gradient bookkeeping. Returns readout_counts (J,)."""
+    """Forward only: max-over-time readout voltage per class → logits; returns class index."""
     dend_inputs = x_input @ w_dend.T
     soma_inputs = x_input @ w_soma.T
     T = x_input.shape[0]
     n_hidden = w_dend.shape[0]
     n_outputs = w_readout.shape[0]
     time_indices = jnp.arange(T, dtype=jnp.int32)
+    dtype = jnp.float64
 
     def step(carry, inputs):
-        mu, v, h, t_prime, mu_at_tp, r_v, r_counts = carry
+        h_carry, r_carry = carry
         dend_in, soma_in, t = inputs
 
-        t_prime_new = jnp.where(t == 0, 0, jnp.where(h == 1, t_prime, t))
-        mu_new = jnp.where(t > 0, alpha_d * mu + (1 - h) * dend_in, dend_in)
-        mu_at_tp_new = jnp.where(h == 0, mu_new, mu_at_tp)
+        h_carry, h_o, h_v_pre, h_h, h_h_prev, h_mu_at_tp = TwoCompNeuron.forward_step(
+            h_carry, dend_in, soma_in, t, alpha_s, alpha_d, T_p, config,
+        )
+        r_carry, r_v, _ = LIFNeuron.forward_step_integrate_only(
+            r_carry, h_o.astype(dtype), w_readout, alpha_m,
+        )
+        new_carry = (h_carry, r_carry)
+        return new_carry, r_v
 
-        plat_dur = t - t_prime_new
-        h_new = jnp.where(
-            (mu_at_tp_new >= config.mu_th) & (plat_dur <= T_p) & (plat_dur >= 0),
-            1, 0,
-        ).astype(jnp.int32)
-
-        v_pre = jnp.where(t > 0, alpha_s * v + soma_in, soma_in)
-        o_h = jnp.where(v_pre >= config.v_th - config.gamma * h_new, 1, 0).astype(jnp.int32)
-        v_new = v_pre * (1 - o_h)
-
-        r_in = o_h.astype(jnp.float64) @ w_readout.T
-        r_v_new = alpha_m * r_v + r_in
-        r_o = jnp.where(r_v_new >= config.v_th, 1, 0).astype(jnp.int32)
-        r_v_new = r_v_new * (1 - r_o)
-        r_counts_new = r_counts + r_o
-
-        return (mu_new, v_new, h_new, t_prime_new, mu_at_tp_new, r_v_new, r_counts_new), None
-
-    init = (
+    n_inputs = x_input.shape[1]
+    h_carry_init = (
         jnp.zeros(n_hidden), jnp.zeros(n_hidden),
         jnp.zeros(n_hidden, dtype=jnp.int32), jnp.zeros(n_hidden, dtype=jnp.int32),
-        jnp.zeros(n_hidden), jnp.zeros(n_outputs), jnp.zeros(n_outputs),
+        jnp.zeros(n_hidden), jnp.zeros(n_inputs),
+        jnp.zeros((n_hidden, n_inputs)), jnp.zeros((n_hidden, n_inputs)),
     )
-    final, _ = lax.scan(step, init, (dend_inputs, soma_inputs, time_indices))
-    return final[6]
+    r_carry_init = (
+        jnp.zeros(n_outputs),
+        jnp.zeros(n_outputs),
+        jnp.zeros(n_hidden),
+    )
+    init_carry = (h_carry_init, r_carry_init)
+    _, v_traj = lax.scan(step, init_carry, (dend_inputs, soma_inputs, time_indices))
+    t_star = jnp.argmax(v_traj, axis=0)
+    j_idx = jnp.arange(n_outputs)
+    v_max = v_traj[t_star, j_idx]
+    return jnp.argmax(v_max)
 
 
-def _loss_and_grads(
-    readout_counts, A_readout, A_soma, A_dend,
-    target_smoothed, T, loss_temperature, loss_count_bias,
+def _max_loss_and_grads(
+    v_readout,
+    mu_tr,
+    dmu_tr,
+    sp_hidden,
+    E_soma_tr,
+    E_readout_tr,
+    w_readout,
+    T_p,
+    alpha_m,
+    target_smoothed,
+    loss_temperature,
+    loss_logit_bias,
+    config,
 ):
-    """Compute loss and weight gradients for one sample."""
-    scaled_logits = readout_counts / loss_temperature + loss_count_bias
-    probs = jnp.exp(scaled_logits - jnp.max(scaled_logits))
-    probs = probs / jnp.sum(probs)
+    """Cross-entropy on max readout voltages; gradients (readout exact, hidden e-prop)."""
+    T = v_readout.shape[0]
+    J = v_readout.shape[1]
 
-    prediction = jnp.argmax(readout_counts)
+    t_star = jnp.argmax(v_readout, axis=0)
+    j_idx = jnp.arange(J)
+    v_max = v_readout[t_star, j_idx]
+
+    logits = v_max / loss_temperature + loss_logit_bias
+    probs = jnp.exp(logits - jnp.max(logits))
+    probs = probs / jnp.sum(probs)
+    prediction = jnp.argmax(v_max)
     loss = -jnp.sum(target_smoothed * jnp.log(probs + 1e-8))
     global_error = target_smoothed - probs
 
-    grad_readout = (global_error[:, None] * A_readout) / T
-    grad_soma = jnp.einsum("j,jik->ik", global_error, A_soma) / (T * 8.0)
-    grad_dend = jnp.einsum("j,jik->ik", global_error, A_dend) / T
+    grad_readout = global_error[:, None] * E_readout_tr[t_star, :]
+
+    t_grid = jnp.arange(T, dtype=jnp.int32)[:, None]
+    t_star_row = t_star[None, :]
+    M = (t_grid <= t_star_row).astype(v_readout.dtype) * (
+        alpha_m ** jnp.maximum(0, t_star_row - t_grid)
+    )
+    phi = jnp.einsum("j,tj,ji->ti", global_error, M, w_readout)
+
+    G = _sliding_argmax_mu(mu_tr, T_p)
+    n_broadcast = jnp.broadcast_to(
+        jnp.arange(mu_tr.shape[1], dtype=jnp.int32), G.shape,
+    )
+    mu_at_g = mu_tr[G, n_broadcast]
+    hp_heur = surrogate_sigma(mu_at_g - config.mu_th, config.beta_d)
+    dmu_pick = dmu_tr[G, n_broadcast, :]
+
+    T_scale = jnp.maximum(
+        jnp.array(1.0, dtype=phi.dtype), jnp.asarray(T, dtype=phi.dtype),
+    )
+    grad_soma = jnp.einsum("ti,ti,tk->ik", phi, sp_hidden, E_soma_tr) / T_scale
+    grad_dend = (
+        config.gamma
+        * jnp.einsum("ti,ti,ti,tik->ik", phi, sp_hidden, hp_heur, dmu_pick)
+        / T_scale
+    )
 
     return loss, prediction, grad_readout, grad_soma, grad_dend
 
@@ -231,7 +272,6 @@ _FWD_AXES = (
     None, None, None, None, None, # alpha_s, alpha_d, alpha_m, T_p, config
     (0, 0, 0, 0, 0, 0, 0, 0),    # h_carry_init (8-tuple, each batched)
     (0, 0, 0),                    # r_carry_init (3-tuple, each batched)
-    0,                            # A_d_init
     0,                            # rng_key (per-sample)
     None,                         # dropout_rate (shared)
 )
@@ -243,9 +283,12 @@ _PRED_AXES = (
 )
 
 _LOSS_AXES = (
-    0, 0, 0, 0,                  # counts, A_r, A_s, A_d (per-sample)
-    0,                            # target_smoothed (per-sample)
-    None, None, None,             # T, loss_temperature, loss_count_bias
+    0, 0, 0, 0, 0, 0,            # v_readout, mu, dmu, sp, E_soma, E_readout
+    None,                         # w_readout
+    None,                         # T_p (shared network)
+    None,                         # alpha_m
+    0,                            # target_smoothed
+    None, None, None,            # loss_temperature, loss_logit_bias, config
 )
 
 
@@ -257,13 +300,13 @@ _LOSS_AXES = (
 
 _fwd_single = jit(_forward_and_accum)
 _pred_single = jit(_predict_only)
-_loss_single = jit(_loss_and_grads)
+_loss_single = jit(_max_loss_and_grads)
 _apply = jit(_apply_grads)
 _adam = jit(_adam_apply)
 
 _fwd_batch = jit(vmap(_forward_and_accum, in_axes=_FWD_AXES))
 _pred_batch = jit(vmap(_predict_only, in_axes=_PRED_AXES))
-_loss_batch = jit(vmap(_loss_and_grads, in_axes=_LOSS_AXES))
+_loss_batch = jit(vmap(_max_loss_and_grads, in_axes=_LOSS_AXES))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -332,11 +375,6 @@ class Network:
         sn = (B, n) if B else (n,)
         return (jnp.zeros(sj), jnp.zeros(sj), jnp.zeros(sn))
 
-    def _A_d_zeros(self, B=None):
-        """Dendritic accumulator zeros."""
-        base = (self.n_outputs, self.n_hidden, self.n_inputs)
-        return jnp.zeros((B,) + base if B else base)
-
     def _weights(self):
         return self.hidden.w_dend, self.hidden.w_soma, self.readout.w
 
@@ -389,18 +427,17 @@ class Network:
         """Train on one sample (with dropout during forward pass).
         Returns: (loss, prediction, grad_norms_dict)
         """
-        T = x_input.shape[0]
-
-        counts, A_r, A_s, A_d = _fwd_single(
+        v_readout, mu_tr, dmu_tr, sp_hidden, E_soma_tr, E_readout_tr = _fwd_single(
             x_input, *self._weights(), *self._params(),
-            self._h_carry(), self._r_carry(), self._A_d_zeros(),
+            self._h_carry(), self._r_carry(),
             self._next_key(), self.dropout_rate,
         )
 
         loss, pred, g_r, g_s, g_d = _loss_single(
-            counts, A_r, A_s, A_d,
-            self._smooth_targets(target), T,
-            self.config.loss_temperature, self.config.loss_count_bias,
+            v_readout, mu_tr, dmu_tr, sp_hidden, E_soma_tr, E_readout_tr,
+            self.readout.w, self.hidden.T_p, self.readout.alpha_m,
+            self._smooth_targets(target),
+            self.config.loss_temperature, self.config.loss_count_bias, self.config,
         )
 
         gnorms = {
@@ -414,8 +451,7 @@ class Network:
 
     def predict(self, x_input):
         """Predict one sample (no dropout). x_input: (T,K) → int class label."""
-        counts = _pred_single(x_input, *self._weights(), *self._params())
-        return int(jnp.argmax(counts))
+        return int(_pred_single(x_input, *self._weights(), *self._params()))
 
     # ── Batched API ──
 
@@ -424,20 +460,20 @@ class Network:
         Returns: (mean_loss, predictions_array (B,), grad_norms_dict)
         """
         B = x_batch.shape[0]
-        T = x_batch.shape[1]
 
         batch_keys = random.split(self._next_key(), B)
 
-        counts, A_r, A_s, A_d = _fwd_batch(
+        v_readout, mu_tr, dmu_tr, sp_hidden, E_soma_tr, E_readout_tr = _fwd_batch(
             x_batch, *self._weights(), *self._params(),
-            self._h_carry(B), self._r_carry(B), self._A_d_zeros(B),
+            self._h_carry(B), self._r_carry(B),
             batch_keys, self.dropout_rate,
         )
 
         losses, preds, g_r, g_s, g_d = _loss_batch(
-            counts, A_r, A_s, A_d,
-            self._smooth_targets(targets), T,
-            self.config.loss_temperature, self.config.loss_count_bias,
+            v_readout, mu_tr, dmu_tr, sp_hidden, E_soma_tr, E_readout_tr,
+            self.readout.w, self.hidden.T_p, self.readout.alpha_m,
+            self._smooth_targets(targets),
+            self.config.loss_temperature, self.config.loss_count_bias, self.config,
         )
 
         g_r_avg = jnp.mean(g_r, axis=0)
@@ -455,5 +491,4 @@ class Network:
 
     def batch_predict(self, x_batch):
         """Predict B samples in parallel. x_batch: (B,T,K) → (B,) int labels."""
-        counts = _pred_batch(x_batch, *self._weights(), *self._params())
-        return jnp.argmax(counts, axis=1)
+        return _pred_batch(x_batch, *self._weights(), *self._params())
