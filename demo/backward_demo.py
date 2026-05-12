@@ -2,21 +2,16 @@
 """
 Backward-pass demo for the same one-neuron setup as demo.py.
 
-For each compartment (dendrite and soma), plot three rows:
-  1. Eligibility trace
-        - Soma:     dv/dw        = E_soma
-        - Dendrite: dmu_t'/dw    (frozen at plateau start — the e-prop one)
-  2. Surrogate gradient
-        - Soma:     do/dv         = sigma'(v + gamma*h - v_th)
-        - Dendrite: dh/dmu_t'     = sigma'(mu_at_t' - mu_th)
-  3. Total gradient per timestep = surrogate * eligibility
-        (error term intentionally omitted — this is the local factor only)
+Soma figure (3 rows): surrogate gradient, somatic eligibility, total local factor.
 
-Three input channels are shown as separate colored lines.
+Dendrite figure (4 rows): somatic surrogate (reference), dendritic surrogate,
+dendritic eligibility (∂μ_{t'}/∂w), dendritic total local factor.
+
+Five input channels are shown as separate colored lines in multi-channel panels.
 
 Outputs:
-  demo/backward_dendrite.png
-  demo/backward_soma.png
+  demo/backward_dendrite.png and .svg
+  demo/backward_soma.png and .svg
 """
 import os
 import sys
@@ -42,17 +37,20 @@ from config import NeuronConfig, surrogate_sigma  # noqa: E402
 from two_comp_neuron import TwoCompNeuron  # noqa: E402
 from demo import build_mock_input  # noqa: E402  (reuse mock-input helper)
 
+_TRACE_LW = 2.2
+_DEND_SURR_COLOR = "#2ca02c"
+
 
 def run_backward():
     """Replay forward pass + record all quantities needed for backward plots."""
     config = NeuronConfig()
     T = 300
-    spike_times = [10, 80, 200]
-    n_inputs = 3
+    spike_times = [10, 80, 200, 65, 250]
+    n_inputs = 5
     n_neurons = 1
 
-    w_dend = jnp.array([[0.7, 1.0, 0.2]])
-    w_soma = jnp.array([[0.6, 0.3, 0.5]])
+    w_dend = jnp.array([[0.7, 1.0, 0.2, 0.0, 0.3]])
+    w_soma = jnp.array([[0.8, 0.3, 0.5, 0.3, 1.0]])
 
     neuron = TwoCompNeuron(jax.random.PRNGKey(0), n_neurons, n_inputs, config)
     neuron.w_dend = w_dend
@@ -131,6 +129,7 @@ def run_backward():
 
     return {
         "T": T,
+        "n_inputs": n_inputs,
         "config": config,
         "spike_times": spike_times,
         "h": h_hist,
@@ -143,67 +142,112 @@ def run_backward():
     }
 
 
+def _channel_colors(n_in: int):
+    tab = plt.cm.tab10.colors
+    return [tab[i % len(tab)] for i in range(n_in)]
+
+
 def _plot_compartment(res: dict, which: str, out_path: str):
     T = res["T"]
     t_axis = np.arange(T)
-    colors = ["C0", "C2", "C4"]
-    labels = [f"ch{k}" for k in range(3)]
 
     if which == "dend":
-        elig = res["dmu_atp"]
+        title_pre = "Dendrite"
+        soma_surrogate = res["sp_hidden"]
         surrogate = res["hp_hidden"]
+        dend_elig = res["dmu_atp"]
         total = res["dend_total"]
-        elig_label = r"$\partial \mu_{t'}/\partial w_\mathrm{dend}$"
+        soma_surr_label = r"$\partial o/\partial v$"
         surr_label = r"$\partial h / \partial \mu_{t'}$"
+        dend_elig_label = r"$\partial \mu_{t'}/\partial w_\mathrm{dend}$"
         total_label = (
             r"$\gamma \cdot \partial o/\partial v "
             r"\cdot \partial h / \partial \mu_{t'} "
             r"\cdot \partial \mu_{t'}/\partial w_\mathrm{dend}$"
         )
-        title_pre = "Dendrite"
+        nrows = 4
+        fig_h = 10.5
     elif which == "soma":
-        elig = res["E_soma"]
+        title_pre = "Soma"
         surrogate = res["sp_hidden"]
+        soma_elig = res["E_soma"]
         total = res["soma_total"]
-        elig_label = r"$\partial v/\partial w_\mathrm{soma}$"
         surr_label = r"$\partial o/\partial v$"
+        soma_elig_label = r"$\partial v/\partial w_\mathrm{soma}$"
         total_label = (
             r"$\partial o/\partial v \cdot "
             r"\partial v/\partial w_\mathrm{soma}$"
         )
-        title_pre = "Soma"
+        nrows = 3
+        fig_h = 8.0
     else:
         raise ValueError(which)
 
-    fig, axes = plt.subplots(3, 1, sharex=True, figsize=(10, 8))
+    n_in = int(res["n_inputs"])
+    colors = _channel_colors(n_in)
+    labels = [f"ch{k}" for k in range(n_in)]
 
-    # 1. Eligibility trace — one line per input channel
-    for k in range(3):
-        axes[0].plot(t_axis, elig[:, k], color=colors[k], label=labels[k])
-    axes[0].set_ylabel(elig_label)
-    axes[0].set_title(f"{title_pre}: eligibility trace")
-    axes[0].legend(loc="upper right", fontsize=8)
-    axes[0].grid(True, alpha=0.3)
+    fig, axes = plt.subplots(nrows, 1, sharex=True, figsize=(10, fig_h))
+    surr_color = _DEND_SURR_COLOR if which == "dend" else "C3"
 
-    # 2. Surrogate gradient — scalar (single line)
-    axes[1].plot(t_axis, surrogate, color="C3")
-    axes[1].set_ylabel(surr_label)
-    axes[1].set_title(f"{title_pre}: surrogate gradient")
-    axes[1].grid(True, alpha=0.3)
+    def _plot_multiline(ax, ydata, ylabel, ptitle, legend=True):
+        for k in range(n_in):
+            ax.plot(
+                t_axis, ydata[:, k], color=colors[k], label=labels[k],
+                linewidth=_TRACE_LW,
+            )
+        ax.set_ylabel(ylabel)
+        ax.set_title(ptitle)
+        if legend:
+            ax.legend(loc="upper right", fontsize=8)
+        ax.grid(True, alpha=0.3)
 
-    # 3. Total per-timestep gradient = surrogate * eligibility (error omitted)
-    for k in range(3):
-        axes[2].plot(t_axis, total[:, k], color=colors[k], label=labels[k])
-    axes[2].set_ylabel(total_label)
-    axes[2].set_xlabel("Time (ms)")
-    axes[2].set_title(f"{title_pre}: total gradient per timestep (error omitted)")
-    axes[2].legend(loc="upper right", fontsize=8)
-    axes[2].grid(True, alpha=0.3)
+    i = 0
+    if which == "dend":
+        axes[i].plot(t_axis, soma_surrogate, color="C3", linewidth=_TRACE_LW)
+        axes[i].set_ylabel(soma_surr_label)
+        axes[i].set_title("Somatic surrogate gradient (same hidden neuron)")
+        axes[i].grid(True, alpha=0.3)
+        i += 1
+
+    axes[i].plot(t_axis, surrogate, color=surr_color, linewidth=_TRACE_LW)
+    axes[i].set_ylabel(surr_label)
+    axes[i].set_title(f"{title_pre}: surrogate gradient")
+    axes[i].grid(True, alpha=0.3)
+    i += 1
+
+    if which == "dend":
+        _plot_multiline(
+            axes[i],
+            dend_elig,
+            dend_elig_label,
+            f"{title_pre}: eligibility trace",
+        )
+        i += 1
+    else:
+        _plot_multiline(
+            axes[i],
+            soma_elig,
+            soma_elig_label,
+            f"{title_pre}: eligibility trace",
+        )
+        i += 1
+
+    _plot_multiline(
+        axes[i],
+        total,
+        total_label,
+        f"{title_pre}: total gradient per timestep (error omitted)",
+    )
+    axes[i].set_xlabel("Time (ms)")
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
+    svg_path = os.path.splitext(out_path)[0] + ".svg"
+    fig.savefig(svg_path)
     plt.close(fig)
     print(f"Saved {out_path}")
+    print(f"Saved {svg_path}")
 
 
 def main():

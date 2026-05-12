@@ -35,6 +35,7 @@ if _SCRIPT_DIR not in sys.path:
 from data.shd_binned import load_shd_binned
 from config import NeuronConfig
 from network import Network
+from checkpoint import save_checkpoint
 
 
 def apply_temporal_jitter(x_input, jitter_range: int):
@@ -131,6 +132,14 @@ def parse_args():
         choices=["32", "64"],
         default=_PRECISION,
         help="Floating-point precision for JAX computations.",
+    )
+    p.add_argument(
+        "--save_model",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Save the final network to PATH.npz and PATH.meta.json "
+        "(weights, T_p, NeuronConfig). Load in other scripts via checkpoint.load_checkpoint.",
     )
     return p.parse_args()
 
@@ -269,8 +278,10 @@ def main():
     best_epoch = 0
     epochs_since_lr_drop = 0
     epochs_without_improvement = 0
+    last_epoch = 0
 
     for epoch in range(1, args.epochs + 1):
+        last_epoch = epoch
         idx = np.random.permutation(n_train)
         losses = []
         correct = 0
@@ -376,6 +387,31 @@ def main():
         f"Best test accuracy: {best_test_acc:.2f}% (epoch {best_epoch})",
         flush=True,
     )
+
+    if args.save_model:
+        extra = {
+            "precision": args.precision,
+            "seed": args.seed,
+            "last_epoch": last_epoch,
+            "final_test_acc": float(final_acc),
+            "best_test_acc": float(best_test_acc),
+            "best_epoch": int(best_epoch),
+            "data": {
+                "bin_size_ms": args.bin_size_ms,
+                "collapse_factor": args.collapse_factor,
+                "max_duration_ms": args.max_duration_ms,
+                "binarize": bool(args.binarize),
+                "input_scale": float(args.input_scale),
+            },
+            "training": {
+                "epochs": args.epochs,
+                "lr": args.lr,
+                "batch_size": args.batch_size,
+                "optimizer": args.optimizer,
+            },
+        }
+        npz_path, meta_path = save_checkpoint(net, args.save_model, extra=extra)
+        print(f"Saved model checkpoint:\n  {npz_path}\n  {meta_path}", flush=True)
 
 
 if __name__ == "__main__":

@@ -3,17 +3,15 @@
 Minimal demo of one two-compartmental hidden neuron driven by mock input.
 
 Setup:
-  - 3 input channels, each firing a single spike at t = 10, 80, 200 ms.
-  - Dendritic weights: [1.0, 1.0, 0.2]
-  - Somatic   weights: [0.2, 0.3, 0.5]
-  - Plateau window T_p fixed to 200 ms (reproducible).
+  - 5 input channels, spikes at t = 10, 80, 200, 45, 250 ms.
+  - Dendritic weights: [0.7, 1.0, 0.2, 0.0, 0.3]
+  - Somatic   weights: [0.8, 0.3, 0.5, 0.3, 1.0]
+  - Plateau window T_p fixed to 150 ms (reproducible).
 
 Plots two subplots:
   1. dendritic voltage mu and plateau state h
   2. somatic voltage v and dynamic threshold v_th - gamma * h
 
-Input spike times are shown as dotted vertical lines; hidden output
-spike times are shown as dashed vertical lines.
 """
 import os
 import sys
@@ -36,6 +34,8 @@ if _NO_HISTORY not in sys.path:
 from config import NeuronConfig  # noqa: E402
 from two_comp_neuron import TwoCompNeuron  # noqa: E402
 
+_TRACE_LW = 2.2
+
 
 def build_mock_input(T: int, spike_times_ms, n_inputs: int) -> jnp.ndarray:
     """One input channel per spike time. Channel i fires a single spike at
@@ -51,12 +51,12 @@ def run_demo():
     config = NeuronConfig()
 
     T = 300
-    spike_times = [10, 80, 200]
-    n_inputs = 3
+    spike_times = [10, 80, 200, 60, 250]
+    n_inputs = 5
     n_neurons = 1
 
-    w_dend = jnp.array([[0.3, 1.0, 0.2]])
-    w_soma = jnp.array([[0.8, 0.3, 0.5]])
+    w_dend = jnp.array([[0.7, 1.0, 0.2, 0.0, 0.3]])
+    w_soma = jnp.array([[0.8, 0.3, 0.5, 0.3, 1.0]])
 
     neuron = TwoCompNeuron(jax.random.PRNGKey(0), n_neurons, n_inputs, config)
     neuron.w_dend = w_dend
@@ -121,27 +121,26 @@ def plot_demo(res: dict, out_path: str):
     cfg = res["config"]
     t_axis = np.arange(T)
     mu = res["mu"]
-    v = res["v"]
     v_pre = res["v_pre"]
     h = res["h"]
-    o = res["o"]
-    in_spikes = res["spike_times"]
-    out_spikes = np.where(o > 0)[0].tolist()
     dyn_threshold = cfg.v_th - cfg.gamma * h
 
     fig, (ax_d, ax_s) = plt.subplots(2, 1, figsize=(10, 6))
 
     # --- Subplot 1: dendritic voltage mu + plateau state h ---
-    ax_d.plot(t_axis, mu, color="C0", label=r"$\mu$ (dendritic voltage)")
-    ax_d.plot(t_axis, h, color="C1", drawstyle="steps-post",
-              label=r"plateau $h$")
-    ax_d.axhline(cfg.mu_th, color="C0", linestyle=":", alpha=0.5,
-                 label=rf"$\mu_\mathrm{{th}}={cfg.mu_th}$")
+    ax_d.plot(
+        t_axis, mu, color="C0", label=r"$\mu$ (dendritic voltage)",
+        linewidth=_TRACE_LW,
+    )
+    ax_d.plot(
+        t_axis, h, color="C1", drawstyle="steps-post",
+        label=r"plateau $h$", linewidth=_TRACE_LW,
+    )
+    ax_d.axhline(
+        cfg.mu_th, color="C0", linestyle=":", alpha=0.5,
+        label=rf"$\mu_\mathrm{{th}}={cfg.mu_th}$", linewidth=_TRACE_LW,
+    )
     ax_d.set_ylabel(r"$\mu$")
-
-    for i, ts in enumerate(out_spikes):
-        ax_d.axvline(ts, color="k", linestyle="--", alpha=0.7,
-                     label="hidden spike" if i == 0 else None)
 
     ax_d.set_title(r"Dendrite: voltage $\mu$ and plateau state $h$"
                    rf"  ($T_p={res['T_p']}$ ms)")
@@ -149,16 +148,16 @@ def plot_demo(res: dict, out_path: str):
     ax_d.grid(True, alpha=0.3)
     ax_d.legend(loc="upper right", fontsize=8)
 
-    # --- Subplot 2: somatic voltage v + dynamic threshold v_th - gamma*h ---
-    ax_s.plot(t_axis, v_pre, color="C3", alpha=0.55,
-              label=r"$v$ (pre-reset)")
-    ax_s.plot(t_axis, v, color="C3", label=r"$v$ (post-reset)")
-    ax_s.plot(t_axis, dyn_threshold, color="k", linestyle="--",
-              label=r"dynamic threshold $v_\mathrm{th}-\gamma h$")
-
-    for i, ts in enumerate(out_spikes):
-        ax_s.axvline(ts, color="k", linestyle="--", alpha=0.7,
-                     label="hidden spike" if i == 0 else None)
+    # --- Subplot 2: somatic pre-reset v + dynamic threshold v_th - gamma*h ---
+    ax_s.plot(
+        t_axis, v_pre, color="C3", label=r"$v$ (pre-reset)",
+        linewidth=_TRACE_LW,
+    )
+    ax_s.plot(
+        t_axis, dyn_threshold, color="k", linestyle="--",
+        label=r"dynamic threshold $v_\mathrm{th}-\gamma h$",
+        linewidth=_TRACE_LW,
+    )
 
     ax_s.set_ylabel(r"$v$")
     ax_s.set_xlabel("Time (ms)")
@@ -169,8 +168,11 @@ def plot_demo(res: dict, out_path: str):
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
+    svg_path = os.path.splitext(out_path)[0] + ".svg"
+    fig.savefig(svg_path)
     plt.close(fig)
     print(f"Saved {out_path}")
+    print(f"Saved {svg_path}")
 
 
 def main():
