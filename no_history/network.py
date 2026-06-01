@@ -3,7 +3,7 @@ from jax import random, jit, lax, vmap
 
 from config import NeuronConfig, surrogate_sigma
 from two_comp_neuron import TwoCompNeuron
-from lif_neuron import LIFNeuron
+from lif_neuron import LINeuron
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -29,7 +29,7 @@ def _forward_and_accum(
     rng_key:      PRNG key for dropout masks
     dropout_rate: fraction of hidden spikes to drop (0.0 = no dropout)
 
-    Returns: readout_counts (J,), A_readout (J,N), A_soma (J,N,K), A_dend (J,N,K)
+    Returns: readout_v_sum (J,), A_readout (J,N), A_soma (J,N,K), A_dend (J,N,K)
     """
     dend_inputs = x_input @ w_dend.T
     soma_inputs = x_input @ w_soma.T
@@ -54,8 +54,8 @@ def _forward_and_accum(
         mask = random.bernoulli(drop_key, 1.0 - dropout_rate, (n_hidden,)).astype(jnp.float64)
         hidden_o_float = hidden_o_float * mask * dropout_scale
 
-        r_carry, r_o, r_v_pre, r_E = LIFNeuron.forward_step(
-            r_carry, hidden_o_float, w_readout, alpha_m, config.v_th,
+        r_carry, _r_v, r_E = LINeuron.forward_step(
+            r_carry, hidden_o_float, w_readout, alpha_m,
         )
 
         mu_c, v_c, h_c, tp_c, matp_c, E_soma_c, dmu_c, dmu_atp_c = h_carry
@@ -67,40 +67,39 @@ def _forward_and_accum(
         )
         h_carry = (mu_c, v_c, h_c, tp_c, matp_c, E_soma_new, dmu_new, dmu_atp_new)
 
-        sp_readout = surrogate_sigma(r_v_pre - config.v_th, config.beta_s)
         sp_hidden = surrogate_sigma(
             h_v_pre + config.gamma * h_h - config.v_th, config.beta_s,
         )
         hp_hidden = surrogate_sigma(h_mu_at_tp - config.mu_th, config.beta_d)
 
-        eta = sp_readout[:, None] * w_readout * sp_hidden[None, :]
+        eta = w_readout * sp_hidden[None, :]
         eta_d = eta * (hp_hidden * config.gamma)[None, :]
         A_d = A_d + jnp.einsum("ji,ik->jik", eta_d, dmu_atp_new)
 
         new_carry = (h_carry, r_carry, A_d)
-        per_step = (sp_readout, sp_hidden, r_E, E_soma_new)
+        per_step = (sp_hidden, r_E, E_soma_new)
         return new_carry, per_step
 
     init_carry = (h_carry_init, r_carry_init, A_d_init)
     scan_inputs = (dend_inputs, soma_inputs, x_input, time_indices, dropout_keys)
     final_carry, per_step_all = lax.scan(step, init_carry, scan_inputs)
 
-    sp_r, sp_h, E_r, E_s = per_step_all
+    sp_h, E_r, E_s = per_step_all
     _, r_carry_f, A_d_f = final_carry
-    readout_counts = r_carry_f[1]
+    readout_v_sum = r_carry_f[1]
 
-    A_readout = jnp.einsum("ti,tj->ij", sp_r, E_r)
-    C_soma = jnp.einsum("tj,ti,tk->jik", sp_r, sp_h, E_s)
-    A_soma = w_readout[:, :, None] * C_soma
+    A_readout = jnp.tile(jnp.sum(E_r, axis=0), (w_readout.shape[0], 1))
+    C_soma = jnp.einsum("ti,tk->ik", sp_h, E_s)
+    A_soma = w_readout[:, :, None] * C_soma[None, :, :]
 
-    return readout_counts, A_readout, A_soma, A_d_f
+    return readout_v_sum, A_readout, A_soma, A_d_f
 
 
 def _predict_only(
     x_input, w_dend, w_soma, w_readout,
     alpha_s, alpha_d, alpha_m, T_p, config,
 ):
-    """Forward pass only — no gradient bookkeeping. Returns readout_counts (J,)."""
+    """Forward pass only — no gradient bookkeeping. Returns readout_v_sum (J,)."""
     dend_inputs = x_input @ w_dend.T
     soma_inputs = x_input @ w_soma.T
     T = x_input.shape[0]
@@ -109,7 +108,7 @@ def _predict_only(
     time_indices = jnp.arange(T, dtype=jnp.int32)
 
     def step(carry, inputs):
-        mu, v, h, t_prime, mu_at_tp, r_v, r_counts = carry
+        mu, v, h, t_prime, mu_at_tp, r_v, r_v_sum = carry
         dend_in, soma_in, t = inputs
 
         t_prime_new = jnp.where(t == 0, 0, jnp.where(h == 1, t_prime, t))
@@ -128,11 +127,9 @@ def _predict_only(
 
         r_in = o_h.astype(jnp.float64) @ w_readout.T
         r_v_new = alpha_m * r_v + r_in
-        r_o = jnp.where(r_v_new >= config.v_th, 1, 0).astype(jnp.int32)
-        r_v_new = r_v_new * (1 - r_o)
-        r_counts_new = r_counts + r_o
+        r_v_sum_new = r_v_sum + r_v_new
 
-        return (mu_new, v_new, h_new, t_prime_new, mu_at_tp_new, r_v_new, r_counts_new), None
+        return (mu_new, v_new, h_new, t_prime_new, mu_at_tp_new, r_v_new, r_v_sum_new), None
 
     init = (
         jnp.zeros(n_hidden), jnp.zeros(n_hidden),
@@ -144,15 +141,16 @@ def _predict_only(
 
 
 def _loss_and_grads(
-    readout_counts, A_readout, A_soma, A_dend,
+    readout_v_sum, A_readout, A_soma, A_dend,
     target_smoothed, T, loss_temperature, loss_count_bias,
 ):
     """Compute loss and weight gradients for one sample."""
-    scaled_logits = readout_counts / loss_temperature + loss_count_bias
+    readout_v_avg = readout_v_sum / T
+    scaled_logits = readout_v_avg / loss_temperature + loss_count_bias
     probs = jnp.exp(scaled_logits - jnp.max(scaled_logits))
     probs = probs / jnp.sum(probs)
 
-    prediction = jnp.argmax(readout_counts)
+    prediction = jnp.argmax(readout_v_avg)
     loss = -jnp.sum(target_smoothed * jnp.log(probs + 1e-8))
     global_error = target_smoothed - probs
 
@@ -295,7 +293,7 @@ class Network:
 
         key_h, key_r, key_rng = random.split(key, 3)
         self.hidden = TwoCompNeuron(key_h, n_hidden, n_inputs, config)
-        self.readout = LIFNeuron(key_r, n_outputs, n_hidden, config)
+        self.readout = LINeuron(key_r, n_outputs, n_hidden, config)
         self.rng_key = key_rng
 
         if optimizer == "adam":

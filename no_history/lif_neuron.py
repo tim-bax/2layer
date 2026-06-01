@@ -37,3 +37,37 @@ class LIFNeuron:
 
         new_carry = (v, readout_counts, E_readout)
         return new_carry, o, v_pre_reset, E_readout
+
+
+class LINeuron:
+    """Leaky integrator readout: same membrane dynamics as LIF, no spike or reset."""
+
+    def __init__(self, key: jnp.ndarray, n_neurons: int, n_inputs: int, config: NeuronConfig):
+        self.n_neurons = n_neurons
+        self.n_inputs = n_inputs
+        self.config = config
+        self.alpha_m = jnp.exp(-config.dt / config.tau_m)
+
+        xavier_std = jnp.sqrt(2.0 / n_inputs)
+        scale = xavier_std * config.weight_scale
+        self.w = random.normal(key, (n_neurons, n_inputs)) * scale
+
+    def init_carry(self):
+        return (
+            jnp.zeros(self.n_neurons),          # v
+            jnp.zeros(self.n_neurons),          # v_sum
+            jnp.zeros(self.n_inputs),           # E_readout
+        )
+
+    @staticmethod
+    def forward_step(carry, spike_input, w, alpha_m):
+        """Pure-function forward step for one timestep. JIT-friendly."""
+        v_prev, v_sum, E_readout_prev = carry
+
+        readout_in = spike_input @ w.T
+        v = alpha_m * v_prev + readout_in
+        v_sum = v_sum + v
+        E_readout = alpha_m * E_readout_prev + spike_input
+
+        new_carry = (v, v_sum, E_readout)
+        return new_carry, v, E_readout

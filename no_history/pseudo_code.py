@@ -29,23 +29,22 @@ mu_at_tprime_next = mu_at_tprime
 
 
 
-# Readout LIF neuron forward pass (from 2comp_uniform.py)
+# Readout LI neuron forward pass
 # Inputs: spike_inputs[t] from hidden layer, readout weights w_readout
-# Carry at step t: v_readout_prev, readout_counts_prev
+# Carry at step t: v_readout_prev, v_sum_prev
 readout_in[t] = spike_inputs[t] @ w_readout.T
 v_readout = alpha_m * v_readout_prev + readout_in[t]
-o_readout = jnp.where(v_readout >= config.v_th, 1, 0)
-v_readout = v_readout * (1 - o_readout) 
-readout_counts = readout_counts_prev + o_readout
+v_sum = v_sum_prev + v_readout
 
 # Next carry state
 v_readout_next = v_readout
-readout_counts_next = readout_counts
+v_sum_next = v_sum
 
 
 # Backward pass (start): readout prediction, loss, global error
-# Inputs: final readout_counts from forward carry, target class index
-scaled_logits = readout_counts / loss_temperature + loss_count_bias
+# Inputs: final v_sum from forward carry, target class index
+v_avg = v_sum / T
+scaled_logits = v_avg / loss_temperature + loss_count_bias
 probs = jnp.exp(scaled_logits - jnp.max(scaled_logits))
 probs = probs / jnp.sum(probs)
 
@@ -56,7 +55,7 @@ target_smoothed = (
 )
 
 # Prediction and cross-entropy loss
-prediction = jnp.argmax(readout_counts)
+prediction = jnp.argmax(v_avg)
 loss = -jnp.sum(target_smoothed * jnp.log(probs + 1e-8))
 
 # Global output error used for readout/hidden updates
@@ -101,15 +100,14 @@ def update_dendritic_eligibility(
 
 # Readout gradient (online accumulation, then apply global error)
 # Full-history form:
-#   grad_readout[i, j] = (1/T) * sum_t global_error[i] * sigma_prime_readout[t, i] * E_readout[t, j]
-# Since global_error is time-independent, accumulate basis over time first.
+#   grad_readout[i, j] = (1/T) * sum_t global_error[i] * E_readout[t, j]
+# Since d v_avg / d v(t) = 1/T, no readout surrogate is needed.
 
 # Per-step (inside sequence loop):
 # Inputs at step t:
-#   v_readout_t (pre-reset membrane), hidden_o_t, E_readout_prev
+#   hidden_o_t, E_readout_prev
 E_readout_t = update_somatic_eligibility(E_readout_prev, hidden_o_t, alpha_readout)
-sigma_prime_readout_t = surrogate_sigma(v_readout_t - config.v_th, beta_readout)  # shape: (n_outputs,)
-A_readout += jnp.einsum("i,j->ij", sigma_prime_readout_t, E_readout_t)            # shape: (n_outputs, n_hidden)
+A_readout += jnp.tile(E_readout_t, (n_outputs, 1))            # shape: (n_outputs, n_hidden)
 E_readout_next = E_readout_t
 
 # End of sequence:
@@ -120,15 +118,14 @@ grad_readout = (global_error[:, None] * A_readout) / T
 
 # Per-step (inside sequence loop):
 # Inputs at step t:
-#   sigma_prime_readout_t (already computed), v_hidden_pre_reset_t, h_hidden_t, extra_o_t, E_soma_hidden_prev, w_readout
+#   v_hidden_pre_reset_t, h_hidden_t, extra_o_t, E_soma_hidden_prev, w_readout
 E_soma_hidden_t = update_somatic_eligibility(E_soma_hidden_prev, extra_o_t, alpha_s_hidden)
 sigma_prime_hidden_t = surrogate_sigma(
     v_hidden_pre_reset_t + config.gamma * h_hidden_t - config.v_th,
     beta_hidden_soma,
 )
 A_soma_hidden += jnp.einsum(
-    "j,ji,i,k->jik",
-    sigma_prime_readout_t,
+    "ji,i,k->jik",
     w_readout,
     sigma_prime_hidden_t,
     E_soma_hidden_t,
@@ -141,7 +138,6 @@ grad_soma_hidden = jnp.einsum("j,jik->ik", global_error, A_soma_hidden) / T
 
 # Hidden 2-comp dendritic gradient (online accumulation, then apply global error)
 # Reuses:
-#   sigma_prime_readout_t  (from readout block)
 #   sigma_prime_hidden_t   (from hidden soma block)
 #
 # Per-step (inside sequence loop):
@@ -156,8 +152,7 @@ dmu_dw_hidden_t, dmu_dw_at_tprime_hidden_t = update_dendritic_eligibility(
     alpha_d_hidden,
 )
 A_dend_hidden += jnp.einsum(
-    "j,ji,i,i,ik->jik",
-    sigma_prime_readout_t,
+    "ji,i,i,ik->jik",
     w_readout,
     sigma_prime_hidden_t,
     h_prime_hidden_t * config.gamma,

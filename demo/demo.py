@@ -55,7 +55,7 @@ def run_demo():
     n_inputs = 5
     n_neurons = 1
 
-    w_dend = jnp.array([[0.7, 1.0, 0.2, 0.0, 0.3]])
+    w_dend = jnp.array([[0.7, 1.1, 0.2, 0.0, 0.3]])
     w_soma = jnp.array([[0.8, 0.3, 0.5, 0.3, 1.0]])
 
     neuron = TwoCompNeuron(jax.random.PRNGKey(0), n_neurons, n_inputs, config)
@@ -125,7 +125,7 @@ def plot_demo(res: dict, out_path: str):
     h = res["h"]
     dyn_threshold = cfg.v_th - cfg.gamma * h
 
-    fig, (ax_d, ax_s) = plt.subplots(2, 1, figsize=(10, 6))
+    fig, (ax_d, ax_s) = plt.subplots(2, 1, figsize=(10, 7.5))
 
     # --- Subplot 1: dendritic voltage mu + plateau state h ---
     ax_d.plot(

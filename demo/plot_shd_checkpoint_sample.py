@@ -11,7 +11,10 @@ Usage (from repo root)::
 
     python demo/plot_shd_checkpoint_sample.py --checkpoint outputs/shd_run1
 
-Requires the checkpoint pair ``<path>.npz`` and ``<path>.meta.json``.
+Requires the checkpoint pair ``<base>.npz`` and ``<base>.meta.json``.
+
+By default only the **first 500 ms** of the trial are drawn (``--plot_ms``); forward /
+selection still use the full sequence.
 """
 from __future__ import annotations
 
@@ -29,12 +32,46 @@ for _p in (_NO_HISTORY, _DATA_ROOT):
         sys.path.insert(0, _p)
 
 
-def _peek_checkpoint_meta(checkpoint_base: str) -> dict:
-    base = checkpoint_base[:-4] if checkpoint_base.endswith(".npz") else checkpoint_base
-    meta_path = base + ".meta.json"
-    if not os.path.isfile(meta_path):
-        raise FileNotFoundError(f"Missing meta JSON: {meta_path}")
-    with open(meta_path, encoding="utf-8") as f:
+def resolve_checkpoint_base(path: str) -> str:
+    """Find directory prefix for ``<base>.npz`` + ``<base>.meta.json``.
+
+    Tries the path as given, then under the repo root, then under ``no_history/``
+    (matching ``run_shd.py`` started from ``no_history/``).
+    """
+    path = os.path.expanduser(path)
+    rel = path[:-4] if path.endswith(".npz") else path
+    tried = []
+    candidates = [rel]
+    if not os.path.isabs(rel):
+        candidates.append(os.path.join(_ROOT, rel))
+        candidates.append(os.path.join(_NO_HISTORY, rel))
+    else:
+        candidates = [rel]
+
+    seen: set[str] = set()
+    deduped = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            deduped.append(c)
+
+    for base in deduped:
+        mp, zp = base + ".meta.json", base + ".npz"
+        tried.append(f"{zp} + {mp}")
+        if os.path.isfile(zp) and os.path.isfile(mp):
+            return base
+
+    raise FileNotFoundError(
+        "Could not find checkpoint .npz and .meta.json together. Tried:\n  "
+        + "\n  ".join(tried)
+        + "\n\nSave with: python no_history/run_shd.py ... --save_model outputs/my_run\n"
+        "If you train from inside no_history/, use e.g. "
+        f"--checkpoint {_NO_HISTORY}/outputs/shd_run1"
+    )
+
+
+def _load_meta(base: str) -> dict:
+    with open(base + ".meta.json", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -50,7 +87,8 @@ def main():
         "--checkpoint",
         type=str,
         default=os.path.join(_ROOT, "outputs", "shd_trained"),
-        help="Checkpoint prefix (same as run_shd.py --save_model; loads .npz + .meta.json).",
+        help="Checkpoint prefix (same as --save_model). Tries cwd, repo root, and no_history/. "
+        "Example: outputs/shd_run1 or no_history/outputs/shd_run1.",
     )
     p.add_argument("--split", choices=("train", "test"), default="test")
     p.add_argument("--seed", type=int, default=0)
@@ -69,9 +107,16 @@ def main():
     p.add_argument("--precision", choices=("32", "64"), default=None,
                    help="JAX x64; default read from checkpoint meta extra.precision.")
     p.add_argument("--out", type=str, default=os.path.join(_SCRIPT_DIR, "shd_checkpoint_raster.png"))
+    p.add_argument(
+        "--plot_ms",
+        type=float,
+        default=500.0,
+        help="Plot only the first plot_ms of simulation time (ms per cfg.dt). Use 0 for the full trial.",
+    )
     args = p.parse_args()
 
-    meta0 = _peek_checkpoint_meta(args.checkpoint)
+    ckpt_base = resolve_checkpoint_base(args.checkpoint)
+    meta0 = _load_meta(ckpt_base)
     prec = _resolve_jax_precision(meta0, args.precision)
 
     import jax
@@ -152,7 +197,7 @@ def main():
         _, (h_tr, o_tr) = lax.scan(step, init, (dend_inputs, soma_inputs, time_indices))
         return h_tr, o_tr
 
-    net, meta = load_checkpoint(args.checkpoint, key=random.PRNGKey(args.seed))
+    net, meta = load_checkpoint(ckpt_base, key=random.PRNGKey(args.seed))
 
     dm = meta.get("extra", {}).get("data", {})
     bin_size_ms = float(dm.get("bin_size_ms", 4.0))
@@ -233,18 +278,29 @@ def main():
     pred = int(net.predict(jnp.asarray(x_np)))
 
     dt = float(cfg.dt)
-    t_ms = np.arange(h_np.shape[0], dtype=np.float64) * dt
+    T_full = int(h_np.shape[0])
+    if args.plot_ms is not None and float(args.plot_ms) > 0:
+        n_plot = min(T_full, int(np.ceil(float(args.plot_ms) / dt)))
+    else:
+        n_plot = T_full
+    n_plot = max(1, n_plot)
+
+    x_plot = x_np[:n_plot]
+    h_np_plot = h_np[:n_plot]
+    o_np_plot = o_np[:n_plot]
+    t_ms = np.arange(n_plot, dtype=np.float64) * dt
+    t_win_ms = float(n_plot * dt)
 
     # --- Figure: raster + plateau / spikes ---
     fig, (ax_r, ax_h) = plt.subplots(
         2, 1, figsize=(11, 6), sharex=True, gridspec_kw={"height_ratios": [2.5, 1], "hspace": 0.08},
     )
-    n_in = x_np.shape[1]
+    n_in = x_plot.shape[1]
     events = []
     for k in range(n_in):
         times = []
-        for t_bin in range(x_np.shape[0]):
-            c = float(x_np[t_bin, k])
+        for t_bin in range(x_plot.shape[0]):
+            c = float(x_plot[t_bin, k])
             if c <= 0:
                 continue
             n_ev = int(min(max(round(c), 1), 12))
@@ -253,16 +309,19 @@ def main():
 
     ax_r.eventplot(events, lineoffsets=np.arange(n_in), linelengths=0.85, colors="black", linewidths=0.6)
     ax_r.set_ylabel("input channel")
-    ax_r.set_title(
+    title = (
         rf"SHD sample idx={idx} ({args.split})  label={y_true}  pred={pred}  "
         rf"hidden $i={sel}$  $T_{{p,i}}={int(np.asarray(T_p[sel]))}$ bins "
         rf"({float(np.asarray(T_p[sel])) * dt:.1f} ms)"
     )
+    if n_plot < T_full:
+        title += rf"  —  first {t_win_ms:.0f} ms of {T_full * dt:.0f} ms trial"
+    ax_r.set_title(title)
     ax_r.set_ylim(-0.5, n_in - 0.5)
     ax_r.invert_yaxis()
 
-    h_i = np.asarray(h_np[:, sel])
-    o_i = np.asarray(o_np[:, sel])
+    h_i = np.asarray(h_np_plot[:, sel])
+    o_i = np.asarray(o_np_plot[:, sel])
     ax_h.fill_between(
         t_ms, 0.0, h_i, step="post", color="0.75", alpha=0.85, label="plateau $h$",
     )
@@ -270,6 +329,8 @@ def main():
     spike_t = t_ms[o_i > 0.5]
     ax_h.vlines(spike_t, ymin=-0.05, ymax=1.05, colors="C3", linewidths=1.2, label="hidden soma spike")
     ax_h.set_ylim(-0.15, 1.15)
+    ax_h.set_xlim(0.0, t_win_ms)
+    ax_r.set_xlim(0.0, t_win_ms)
     ax_h.set_ylabel(f"hidden {sel}\n$h$ / spikes")
     ax_h.set_xlabel("time (ms)")
     ax_h.legend(loc="upper right", fontsize=8)

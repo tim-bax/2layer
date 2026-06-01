@@ -1,0 +1,53 @@
+{
+  "format": "no_history_network_v1",
+  "n_inputs": 350,
+  "n_hidden": 150,
+  "n_outputs": 20,
+  "dropout_rate": 0.5,
+  "weight_decay": 1e-05,
+  "optimizer": "adam",
+  "config": {
+    "mu_th": 1.0,
+    "v_th": 1.0,
+    "gamma": 0.5,
+    "tau_soma": 15.0,
+    "tau_dend": 15.0,
+    "tau_plat_min": 100.0,
+    "tau_plat_max": 350.0,
+    "dt": 2.0,
+    "tau_m": 20.0,
+    "v_reset": 0.0,
+    "beta_s": 1.0,
+    "beta_d": 1.5,
+    "weight_scale": 0.25,
+    "loss_temperature": 2.7,
+    "loss_count_bias": 0.18,
+    "loss_label_smoothing": 0.13
+  },
+  "adam": {
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "adam_eps": 1e-08
+  },
+  "extra": {
+    "precision": "32",
+    "seed": 42,
+    "last_epoch": 15,
+    "final_test_acc": 69.96466431095406,
+    "best_test_acc": 73.14487632508833,
+    "best_epoch": 12,
+    "data": {
+      "bin_size_ms": 2.0,
+      "collapse_factor": 2,
+      "max_duration_ms": 1400.0,
+      "binarize": false,
+      "input_scale": 1.0
+    },
+    "training": {
+      "epochs": 15,
+      "lr": 0.001,
+      "batch_size": 128,
+      "optimizer": "adam"
+    }
+  }
+}

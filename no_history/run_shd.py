@@ -86,7 +86,7 @@ def parse_args():
     p.add_argument("--tau_dend", type=float, default=15.0,
                    help="Dendritic membrane time constant (physical ms; default 15.0).")
     p.add_argument("--tau_m", type=float, default=20.0,
-                   help="Readout LIF membrane time constant (physical ms; default 20.0).")
+                   help="Readout LI membrane time constant (physical ms; default 20.0).")
     p.add_argument("--tau_plat_min", type=float, default=100.0,
                    help="Plateau duration min (physical ms; default 100).")
     p.add_argument("--tau_plat_max", type=float, default=350.0,
@@ -247,7 +247,7 @@ def main():
         jitter_str = f"  augment_jitter=True(range=±{args.jitter_range})"
     wd_str = f"  weight_decay={args.weight_decay}" if args.weight_decay > 0 else ""
     print(
-        f"Network: {n_inputs} -> {args.n_hidden} (2-comp) -> {args.n_outputs} (LIF readout)  "
+        f"Network: {n_inputs} -> {args.n_hidden} (2-comp) -> {args.n_outputs} (LI readout)  "
         f"optimizer={opt_str}  lr={args.lr}{drop_str}{jitter_str}{wd_str}",
         flush=True,
     )

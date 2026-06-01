@@ -7,6 +7,8 @@ Soma figure (3 rows): surrogate gradient, somatic eligibility, total local facto
 Dendrite figure (4 rows): somatic surrogate (reference), dendritic surrogate,
 dendritic eligibility (∂μ_{t'}/∂w), dendritic total local factor.
 
+Each subplot row uses the same height in inches in both figures (``_BACKWARD_ROW_H_IN``).
+
 Five input channels are shown as separate colored lines in multi-channel panels.
 
 Outputs:
@@ -39,6 +41,8 @@ from demo import build_mock_input  # noqa: E402  (reuse mock-input helper)
 
 _TRACE_LW = 2.2
 _DEND_SURR_COLOR = "#2ca02c"
+# Same vertical size per row in soma (3 panels) and dendrite (4 panels) figures.
+_BACKWARD_ROW_H_IN = 3.15
 
 
 def run_backward():
@@ -49,7 +53,7 @@ def run_backward():
     n_inputs = 5
     n_neurons = 1
 
-    w_dend = jnp.array([[0.7, 1.0, 0.2, 0.0, 0.3]])
+    w_dend = jnp.array([[0.7, 1.1, 0.2, 0.0, 0.3]])
     w_soma = jnp.array([[0.8, 0.3, 0.5, 0.3, 1.0]])
 
     neuron = TwoCompNeuron(jax.random.PRNGKey(0), n_neurons, n_inputs, config)
@@ -166,7 +170,6 @@ def _plot_compartment(res: dict, which: str, out_path: str):
             r"\cdot \partial \mu_{t'}/\partial w_\mathrm{dend}$"
         )
         nrows = 4
-        fig_h = 10.5
     elif which == "soma":
         title_pre = "Soma"
         surrogate = res["sp_hidden"]
@@ -179,15 +182,21 @@ def _plot_compartment(res: dict, which: str, out_path: str):
             r"\partial v/\partial w_\mathrm{soma}$"
         )
         nrows = 3
-        fig_h = 8.0
     else:
         raise ValueError(which)
 
+    fig_h = nrows * _BACKWARD_ROW_H_IN
     n_in = int(res["n_inputs"])
     colors = _channel_colors(n_in)
     labels = [f"ch{k}" for k in range(n_in)]
 
-    fig, axes = plt.subplots(nrows, 1, sharex=True, figsize=(10, fig_h))
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        sharex=True,
+        figsize=(10, fig_h),
+        gridspec_kw={"height_ratios": [1.0] * nrows},
+    )
     surr_color = _DEND_SURR_COLOR if which == "dend" else "C3"
 
     def _plot_multiline(ax, ydata, ylabel, ptitle, legend=True):

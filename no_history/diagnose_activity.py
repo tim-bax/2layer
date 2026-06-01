@@ -36,7 +36,7 @@ from data.shd_binned import load_shd_binned
 from config import NeuronConfig
 from network import Network
 from two_comp_neuron import TwoCompNeuron
-from lif_neuron import LIFNeuron
+from lif_neuron import LINeuron
 
 
 def parse_args():
@@ -71,7 +71,7 @@ def run_forward_collect(net, x_input):
     h_carry = h.init_carry()
     r_carry = r.init_carry()
 
-    mus, vs, hs, h_os, r_os, r_vs = [], [], [], [], [], []
+    mus, vs, hs, h_os, r_vs = [], [], [], [], []
     T = x_input.shape[0]
     for t in range(T):
         x_t = x_input[t]
@@ -81,18 +81,17 @@ def run_forward_collect(net, x_input):
             h_carry, dend_in, soma_in, t, h.alpha_s, h.alpha_d, h.T_p, config,
         )
         hidden_o_float = h_o.astype(jnp.float64)
-        r_carry, r_o, r_v_pre, r_E = LIFNeuron.forward_step(
-            r_carry, hidden_o_float, r.w, r.alpha_m, config.v_th,
+        r_carry, r_v, _r_E = LINeuron.forward_step(
+            r_carry, hidden_o_float, r.w, r.alpha_m,
         )
         mu, v = h_carry[0], h_carry[1]
         mus.append(np.asarray(mu))
         vs.append(np.asarray(v))
         hs.append(np.asarray(h_h))
         h_os.append(np.asarray(h_o))
-        r_os.append(np.asarray(r_o))
-        r_vs.append(np.asarray(r_v_pre))
+        r_vs.append(np.asarray(r_v))
     return (np.stack(mus), np.stack(vs), np.stack(hs),
-            np.stack(h_os), np.stack(r_os), np.stack(r_vs))
+            np.stack(h_os), np.stack(r_vs))
 
 
 def main():
@@ -155,7 +154,7 @@ def main():
     all_mu_max, all_mu_mean = [], []
     all_v_max, all_v_mean = [], []
     all_rv_max, all_rv_mean, all_rv_std = [], [], []
-    all_h_rate, all_ho_rate, all_ro_rate = [], [], []
+    all_h_rate, all_ho_rate = [], []
     dead_dend = np.zeros(args.n_hidden)
     dead_soma = np.zeros(args.n_hidden)
     dead_readout = np.zeros(args.n_outputs)
@@ -164,7 +163,7 @@ def main():
     print(f"=== Running forward pass on {n_use} samples ===", flush=True)
     for i in range(n_use):
         x = jnp.array(X_tr[i])
-        mu_seq, v_seq, h_seq, ho_seq, ro_seq, rv_seq = run_forward_collect(net, x)
+        mu_seq, v_seq, h_seq, ho_seq, rv_seq = run_forward_collect(net, x)
         all_mu_max.append(mu_seq.max())
         all_mu_mean.append(mu_seq.mean())
         all_v_max.append(v_seq.max())
@@ -174,10 +173,9 @@ def main():
         all_rv_std.append(rv_seq.std())
         all_h_rate.append(h_seq.mean())
         all_ho_rate.append(ho_seq.mean())
-        all_ro_rate.append(ro_seq.mean())
         dead_dend += (mu_seq.max(axis=0) < config.mu_th).astype(int)
         dead_soma += (ho_seq.sum(axis=0) == 0).astype(int)
-        dead_readout += (ro_seq.sum(axis=0) == 0).astype(int)
+        dead_readout += (rv_seq.max(axis=0) < 1e-8).astype(int)
 
     mu_th, v_th = config.mu_th, config.v_th
     print()
@@ -187,25 +185,24 @@ def main():
     print(f"  Hidden v:       max={np.mean(all_v_max):.3f}  "
           f"mean={np.mean(all_v_mean):.3f}   (v_th={v_th})")
     print(f"  Readout v:      max={np.mean(all_rv_max):.3f}  "
-          f"mean={np.mean(all_rv_mean):.3f}  std={np.mean(all_rv_std):.3f}   (v_th={v_th})")
+          f"mean={np.mean(all_rv_mean):.3f}  std={np.mean(all_rv_std):.3f}")
     print(f"  Plateau h rate: {np.mean(all_h_rate)*100:.3f}%  "
           f"(fraction of timesteps × neurons where h=1)")
     print(f"  Hidden spikes:  {np.mean(all_ho_rate)*100:.3f}%  per (t, neuron)")
-    print(f"  Readout spikes: {np.mean(all_ro_rate)*100:.3f}%  per (t, output)")
     print()
     print(f"  Hidden neurons whose mu NEVER crosses mu_th: "
           f"{int((dead_dend == n_use).sum())}/{args.n_hidden}")
     print(f"  Hidden neurons that NEVER spike:              "
           f"{int((dead_soma == n_use).sum())}/{args.n_hidden}")
-    print(f"  Readout neurons that NEVER spike:             "
+    print(f"  Readout neurons with NO voltage (all trials): "
           f"{int((dead_readout == n_use).sum())}/{args.n_outputs}")
     print()
 
     h_rate = np.mean(all_h_rate)
     ho_rate = np.mean(all_ho_rate)
-    ro_rate = np.mean(all_ro_rate)
     n_dead_readout = int((dead_readout == n_use).sum())
     rv_max_mean = np.mean(all_rv_max)
+    rv_mean_mean = np.mean(all_rv_mean)
     print("=== Suggested action ===")
     if h_rate < 1e-3:
         print("  Plateau rate < 0.1% -> dendritic gradient path is essentially DEAD.")
@@ -220,16 +217,14 @@ def main():
         print("  Hidden spike rate > 50% -> soma saturated; surrogate gradient ~ 0.")
         print("  Try:  --weight_scale 0.1  or  --v_th 1.5")
     if n_dead_readout > args.n_outputs // 4:
-        print(f"  {n_dead_readout}/{args.n_outputs} readout neurons NEVER spike -> "
-              f"those classes can never be predicted.")
-        print(f"  Readout v_max (mean over samples)={rv_max_mean:.3f}, v_th={v_th}.")
-        if rv_max_mean < v_th * 0.5:
-            print("  Readout drive is way below threshold. Try:  --weight_scale 1.0  "
+        print(f"  {n_dead_readout}/{args.n_outputs} readout neurons stay at ~0 voltage -> "
+              f"those classes may be hard to separate.")
+        print(f"  Readout v_max (mean over samples)={rv_max_mean:.3f}, "
+              f"v_mean={rv_mean_mean:.3f}.")
+        if rv_max_mean < 0.01:
+            print("  Readout drive is very weak. Try:  --weight_scale 1.0  "
                   "or  --input_scale 5  (or both).")
-        elif rv_max_mean < v_th:
-            print("  Readout drive grazes threshold. Try:  --weight_scale 0.5  "
-                  "or  --v_th 0.5.")
-    elif 1e-3 <= h_rate <= 0.5 and 1e-3 <= ho_rate <= 0.5 and ro_rate >= 1e-3 and n_dead_readout < args.n_outputs // 4:
+    elif 1e-3 <= h_rate <= 0.5 and 1e-3 <= ho_rate <= 0.5 and n_dead_readout < args.n_outputs // 4:
         print("  Activity looks healthy. If still not learning, check learning rate / loss / optimizer.")
 
 
